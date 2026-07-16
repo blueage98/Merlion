@@ -49,6 +49,56 @@
 
 **검증 환경**: Python 3.14 (numpy<2.0 사전 빌드 휠 없음 → 컴파일러 필요, 우회하여 numpy 2.x/pandas 등 관련 패키지 최신 호환 버전으로 대체 설치 후 검증). `dash==2.18.2` + `psutil` + `multiprocess` 조합으로 스모크 테스트 통과 확인.
 
+## 1-3. Python 버전 재검증 (3.14 → 3.12) 및 실제 코드 버그 수정
+
+Python 3.14 환경에서 발견한 문제들이 Python 버전 자체의 한계인지 merlion 코드의 실제 버그인지 분리하기 위해, **Python 3.12.10**을 별도 venv(`.venv312`)에 설치해 동일 항목을 재검증함.
+
+**재검증 결과 매트릭스**:
+
+| 문제 | Python 3.14 | Python 3.12 |
+|---|---|---|
+| numpy 빌드 실패(컴파일러 필요) | 실패 | **`setup.py` 선언 그대로(`numpy<2.0`, `lightgbm`, `prophet`, `cython` 포함) 컴파일러 없이 정상 설치** — numpy 문제는 3.14 전용, merlion 코드 문제 아님 |
+| dash `>=2.4` 상한 없음 → 최신 dash 설치 시 `ModuleNotFoundError` | 재현 | **동일하게 재현** — Python 버전과 무관한 dash 자체의 버전 문제(1-2 참고) |
+| Enum + `functools.partial` (`AggregationPolicy`) | 재현 (`__members__`가 빈 딕셔너리) | **재현 안 됨** — `AnomalyModel`의 실제 학습(`IsolationForest`)이 정상 통과 |
+
+**Enum 버그 최소 재현** (Python 3.14 전용, merlion 코드와 무관하게 인터프리터 자체에서 재현):
+```python
+from enum import Enum
+from functools import partial
+class Foo(Enum):
+    A = partial(lambda x: x)
+print(Foo.__members__)  # Python 3.14: {} / Python 3.12: {'A': <Foo.A>}
+```
+`merlion/utils/resample.py::AggregationPolicy`가 이 패턴을 사용하므로 Python 3.14에서만 `TimeSeries.align()`이 깨짐 — **merlion 코드 버그가 아니라 Python 3.14 자체의 Enum 구현 변경**.
+
+### 새로 발견되고 수정된 실제 버그: pandas `[-1]` 위치 인덱싱 (KeyError: -1)
+
+Enum 버그가 3.12에서 사라지자, 그 아래 가려져 있던 **별개의 실제 merlion 버그**가 드러남: `ForecastModel.train()`(Arima)이 `pandas.KeyError: -1`로 실패.
+
+**근본 원인**: `DatetimeIndex`를 가진 pandas `Series`에 대해 `series[-1]`(대괄호, 라벨 조회)로 "마지막 값"에 접근하려 시도. 구버전 pandas는 비정수 인덱스에서 정수 키 조회 시 위치 기반으로 암묵 폴백했으나, 이 환경의 **pandas 3.0.3**(`setup.py`는 `pandas>=1.1.0`만 지정, 상한 없음)에서는 이 폴백이 제거되어 `-1`을 존재하지 않는 라벨로 취급 → `KeyError`.
+
+**발견 및 수정 위치** (동일 버그 패턴, 3곳):
+- `merlion/models/forecast/sarima.py:112` — `self._last_val = train_data[-1]` → `train_data.iloc[-1]`
+- `merlion/models/forecast/sarima.py:131` — `last_val = val_prev[-1]` → `val_prev.iloc[-1]`
+- `merlion/models/forecast/ets.py:145` — `self._last_val = train_data[-1]` → `train_data.iloc[-1]`
+- 참고: 같은 파일 `ets.py:165`에는 이미 올바른 패턴(`val_prev.iloc[-1]`)이 존재 — 코드베이스 내에서도 일관되지 않게 혼재했음.
+
+**수정 검증**: `tests/dashboard/`의 `ForecastModel` 학습 테스트가 수정 전 `KeyError: -1`로 실패 → 수정 후 Python 3.12에서 통과. (수정 과정에서 테스트 fixture 자체의 결함도 발견: `forecast_train_test_df`가 train/test 구간을 독립적으로 같은 시작일부터 생성해 시간 범위가 어긋났던 문제 — train 구간에 바로 이어지는 연속 구간으로 fixture를 수정함. `merlion/models/forecast/base.py:152-157`이 test `time_stamps`가 `[train_end, train_end+max_forecast_steps]` 범위 내에 있는지 assert하므로, 실제 예측 시나리오처럼 test 구간이 train 구간 직후로 이어져야 함.)
+
+**최종 검증 결과**: Python 3.12 + `numpy<2.0`(선언 그대로) + `dash==2.18.2` 조합에서 `tests/dashboard/` 10개 테스트 전부 통과(`IsolationForest` 이상탐지, `Arima` 예측 모두 학습→저장→로드 전체 흐름 정상). Python 3.14는 6 passed + 4 xfailed(Enum 버그로 인한 조건부 xfail, `sys.version_info >= (3, 14)`).
+
+### 종합: 실행 환경 제약사항
+
+| 제약 | `setup.py` 선언 | 실제 필요 | 근거 |
+|---|---|---|---|
+| Python | `>=3.7.0` (상한 없음) | **`<3.14`** (정확한 하한 미확인 — 3.12는 안전 확인, 3.13은 미검증) | Enum+`functools.partial` 버그 |
+| numpy | `>=1.21,<2.0` | 선언대로 유지 가능 (3.14에서만 컴파일러 문제) | Python 3.12에서 정상 빌드 확인 |
+| dash | `>=2.4` (상한 없음) | **`>=2.4,<3.0`** | `dash.long_callback` 모듈 제거 (dash 3.0~) |
+| psutil | 미선언 | `dash[diskcache]` 사용 시 명시적으로 필요 | `DiskcacheLongCallbackManager` 런타임 요구사항 |
+| pandas | `>=1.1.0` (상한 없음) | 상한 검토 필요 — 최소 `sarima.py`/`ets.py`의 `.iloc[-1]` 수정으로 pandas 3.0.3에서 해결됨(이번 세션에서 수정 완료) | `series[-1]` 위치 인덱싱 폴백 제거 |
+
+**권장 조합**: `Python 3.12 + numpy<2.0 + dash>=2.4,<3.0` — 이번 세션에서 실제로 end-to-end 검증 완료.
+
 ## 2. 폴더 구조와 계층 파악
 
 **최상위**: `merlion/`(라이브러리), `data/`, `docs/`, `examples/`, `tests/`, `spark_apps/`, `ts_datasets/`, `conf/`, `docker/`, `k8s-spec/`
@@ -103,6 +153,44 @@ Dash 앱이므로 실제 HTTP 라우트/상태코드는 없음. `dashboard/serve
 
 로드 경로도 대칭적으로 `AnomalyModel.load_model` → `ModelFactory` → `ModelBase.load()` (405번째 줄)로 이어짐. DB는 어디에도 없고, 모든 영속화는 `FileManager`가 관리하는 로컬 파일시스템 경로를 통해 이뤄짐.
 
+## 5-1. Dashboard ↔ Merlion 코어 모듈 인터페이스 분석
+
+`merlion/dashboard/`는 core 라이브러리와 세 개의 결합 지점(interface)을 통해서만 연결됨. 이 세 인터페이스만 지키면 core에 새 모델을 추가해도 dashboard 코드 변경이 불필요.
+
+**연결 구조**:
+```
+dashboard/callbacks/anomaly.py, forecast.py
+  → dashboard/models/anomaly.py (AnomalyModel), forecast.py (ForecastModel)
+      → merlion.models.factory.ModelFactory        (algorithm 문자열 → 모델 클래스)
+      → merlion.utils.time_series.TimeSeries        (DataFrame ↔ 내부 시계열 구조)
+      → merlion.models.*.<Model>Config / <Model>    (실제 탐지기/예측기)
+      → merlion.post_process.threshold.*            (importlib 동적 로드, 임계값 후처리)
+      → merlion.evaluate.anomaly.TSADMetric /
+        merlion.evaluate.forecast.ForecastEvaluator  (성능 지표 계산)
+      → merlion.plot.MTSFigure / plot_anoms_plotly   (시각화)
+```
+
+**인터페이스별 소스 위치**:
+
+- **`ModelFactory`** — `merlion/models/factory.py:74` `class ModelFactory`, `get_model_class(cls, name: str) -> Type[ModelBase]` (line 76). 알고리즘 이름 문자열을 모델 클래스로 매핑하는 레지스트리. 대시보드 호출부: `dashboard/models/anomaly.py:104`, `dashboard/models/forecast.py:12`.
+- **`TimeSeries`** — `merlion/utils/time_series.py:329` `class TimeSeries`. 변환 진입점은 `TimeSeries.from_pd(cls, df, check_times=True, drop_nan=True, freq="1h")` (line 759) — pandas DataFrame/Series/ndarray → `TimeSeries` 변환. (참고: 단변량 전용 `UnivariateTimeSeries.from_pd`는 line 286에 별도 존재.) 대시보드 호출부: `dashboard/models/anomaly.py:106-110`.
+- **`ForecastEvaluator`** — `merlion/evaluate/forecast.py`: `ForecastMetric(Enum)` (line 240, sMAPE/MSIS 등 지표), `ForecastEvaluatorConfig` (line 304), `ForecastEvaluator(EvaluatorBase)` (line 347).
+- **`ModelBase`** (위 세 인터페이스가 실제로 다루는 타입) — `merlion/models/base.py:154` `class ModelBase`, `train(self, train_data: TimeSeries, train_config=None)` (line 333). `ModelFactory.get_model_class()`가 반환하는 타입이 곧 이 클래스의 서브클래스.
+
+**대시보드 학습 흐름 예시** (`dashboard/models/anomaly.py:94-133`, `AnomalyModel.train`):
+
+1. `ModelFactory.get_model_class(algorithm)` (line 104) — 문자열 → 클래스
+2. `model_class(model_class.config_class(**params))` (line 105) — UI 파라미터를 core의 `Config` 클래스에 그대로 주입 (대시보드는 개별 모델 파라미터 스키마를 모름, core가 `config_class`로 스스로 노출)
+3. `importlib.import_module("merlion.post_process.threshold")` + `getattr(module, thres_class)` (line 100-102) — 임계값 클래스는 `ModelFactory`와 별개로 자체 리플렉션 사용 (동일 목적에 두 가지 동적 로딩 패턴이 혼재)
+4. `TimeSeries.from_pd(train_df[columns])` (line 106) — GUI 표현(DataFrame)과 core 표현(TimeSeries)의 경계
+5. `model.train(train_data=train_ts)` (line 115), `model.get_anomaly_label(test_ts)` (line 124) — 실제 알고리즘 로직은 전부 core에 위치, dashboard는 호출만 함
+6. `AnomalyModel._compute_metrics` → `merlion.evaluate.anomaly.TSADMetric` — core 평가 파이프라인 재사용
+7. `merlion.plot.MTSFigure`/`plot_anoms_plotly` — core plotting 유틸 재사용
+
+`forecast.py`도 동일 패턴(`ModelFactory`, `ForecastEvaluator`, `TimeSeries`)으로 결합됨.
+
+**관찰**: 결합 지점이 `ModelFactory`(모델 종류) / `TimeSeries`(데이터 형식) / `Config`·`ModelBase`(파라미터·영속화 계약) 세 곳으로 명확히 제한되어 있어 확장성은 좋으나, 임계값(threshold) 클래스 로딩만 `ModelFactory` 레지스트리를 쓰지 않고 별도의 `importlib` 리플렉션을 사용하는 비일관성이 존재함.
+
 ## 6. 숨은 규약과 약점 발견
 
 1. **역직렬화 위험 (dill/pickle 기반 모델 로드)** — `merlion/models/base.py::ModelBase.load()`가 `dill`로 임의 모델 디렉토리를 역직렬화. 서명 검증·화이트리스트 없음 → 신뢰할 수 없는 모델 파일 로드 시 임의 코드 실행 가능.
@@ -112,7 +200,11 @@ Dash 앱이므로 실제 HTTP 라우트/상태코드는 없음. `dashboard/serve
 5. **다운로드 zip 레이스 컨디션** — `get_model_download_path`(`file_manager.py:52-59`)가 동일 경로에 매번 덮어쓰기 압축 → 동시 다운로드 시 zip 파일 손상 가능.
 6. **조회성 콜백의 무방비 예외 전파** — `update_select_file_dropdown` 등(`data.py:37`, `anomaly.py:29`)은 try/except가 전혀 없어 예외 시 브라우저 콘솔에 raw 에러 노출(정보 노출은 적지만 UX 저하).
 7. **초기화 순서 암묵 의존** — `diskcache.Cache` 생성(`file_manager.py:37`)이 디렉토리 존재 여부를 확인하지 않아, import 순서에 조용히 의존.
+8. **[수정 완료] pandas 버전 비호환 — `series[-1]` 위치 인덱싱** — `sarima.py:112,131`, `ets.py:145`가 `DatetimeIndex` 기반 `Series`에 `[-1]`(라벨 조회)로 접근해 pandas 3.0.3에서 `KeyError: -1` 발생. `.iloc[-1]`로 수정하여 해결(1-3 참고). `setup.py`의 `pandas>=1.1.0`에 상한이 없어 향후 pandas 신버전에서 유사 문제가 재발할 수 있음 — 코드베이스 전체에 동일 패턴(`[-1]`, `[0]` 등 라벨/위치 혼용)이 더 있는지 전수 점검 필요.
+9. **`FileManager(directory=...)` 생성자 인자가 실제로 동작하지 않음** — `SingletonClass.__new__(cls)`가 인자를 받지 않아 `FileManager(custom_dir)` 호출 시 `TypeError`. 프로덕션 코드는 항상 `FileManager()`(무인자)로만 호출해 지금까지 발견되지 않은 dormant 버그. (`tests/dashboard/conftest.py`의 `file_manager` fixture에서 `object.__new__` 우회로 확인 및 대응.)
 
 ## 요약
 
 Merlion 핵심 라이브러리는 웹 계층 없는 순수 Python 시계열 라이브러리이며, DB도 없다. `merlion/dashboard/`만이 routes/controllers/services/db에 대응하는 유사 구조(pages→callbacks→models→file_manager)를 가지고 있고, 모든 영속화는 로컬 파일시스템 기반이다. 이 대시보드는 단일 사용자/로컬 실행을 전제로 설계된 것으로 보이며, 다중 사용자 환경에 그대로 노출하면 파일 충돌·정보 노출·역직렬화 기반 RCE 위험이 실질적인 문제가 된다.
+
+**실행 환경 검증 이력**: Python 3.14에서 numpy 빌드 실패, dash 버전 문제, Enum 호환성 문제(3.14 전용, 실질적으로 모든 모델 학습을 막음)를 발견. Python 3.12로 재검증한 결과 numpy/Enum 문제는 해소되었으나, 그 아래 가려져 있던 별개의 실제 버그(pandas `[-1]` 위치 인덱싱, `sarima.py`/`ets.py`)를 새로 발견해 `.iloc[-1]`로 수정 완료. 최종적으로 `Python 3.12 + numpy<2.0 + dash>=2.4,<3.0` 조합에서 이상탐지·예측 모델의 학습→저장→로드 전체 흐름을 `tests/dashboard/`(10개 테스트)로 end-to-end 검증함.

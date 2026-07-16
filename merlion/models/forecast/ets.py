@@ -142,7 +142,7 @@ class ETS(SeasonalityModel, ForecasterBase):
             self.model = self._instantiate_model(pd.Series(train_data.values)).fit(disp=False)
 
         # get forecast for the training data
-        self._last_val = train_data[-1]
+        self._last_val = train_data.iloc[-1]
         self._n_train = len(train_data)
         yhat = pd.DataFrame(self.model.fittedvalues.values, index=times, columns=[name])
         err = pd.DataFrame(self.model.standardized_forecasts_error, index=times, columns=[f"{name}_err"])

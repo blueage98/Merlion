@@ -109,7 +109,7 @@ class Sarima(ForecasterExogBase, SeasonalityModel):
             self.model = model.fit(disp=0)
 
         # FORECASTING: forecast for next n steps using Sarima model
-        self._last_val = train_data[-1]
+        self._last_val = train_data.iloc[-1]
         yhat = (train_data.values - self.model.resid).tolist()
         err = [np.sqrt(self.model.params["sigma2"])] * len(train_data)
         return pd.DataFrame(yhat, index=times, columns=[name]), pd.DataFrame(err, index=times, columns=[f"{name}_err"])
@@ -128,7 +128,7 @@ class Sarima(ForecasterExogBase, SeasonalityModel):
             model = self.model
         else:
             val_prev = time_series_prev.iloc[-self._max_lookback :, self.target_seq_index]
-            last_val = val_prev[-1]
+            last_val = val_prev.iloc[-1]
             exog_data_prev = None if exog_data_prev is None else exog_data_prev.loc[val_prev.index]
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
