@@ -49,6 +49,17 @@ class FileManager(SingletonClass):
                 files.append(filename)
         return files
 
+    def list_sample_files(self):
+        files = []
+        root = self.sample_data_directory
+        if os.path.isdir(root):
+            for dirpath, _, filenames in os.walk(root):
+                for filename in filenames:
+                    if filename.lower().endswith(".csv"):
+                        full_path = os.path.join(dirpath, filename)
+                        files.append(os.path.relpath(full_path, root).replace(os.sep, "/"))
+        return sorted(files)
+
     def get_model_download_path(self, model_name):
         path = os.path.join(self.model_folder, model_name)
         zip_file = os.path.join(path, f"{model_name}.zip")
@@ -73,6 +84,13 @@ class FileManager(SingletonClass):
     @property
     def data_directory(self):
         return self.data_folder
+
+    @property
+    def sample_data_directory(self):
+        repo_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        )
+        return os.path.join(repo_root, "data")
 
     @property
     def model_directory(self):

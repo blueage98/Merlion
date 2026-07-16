@@ -51,6 +51,29 @@ def upload_file(filenames, contents):
 
 
 @callback(
+    Output("select-sample-file", "options"),
+    Input("select-sample-file-parent", "n_clicks"),
+)
+def update_select_sample_file_dropdown(n_clicks):
+    options = []
+    ctx = dash.callback_context
+    prop_id = ctx.triggered_id
+    if prop_id == "select-sample-file-parent":
+        for relpath in file_manager.list_sample_files():
+            options.append({"label": relpath, "value": relpath})
+    return options
+
+
+@callback(
+    Output("select-file", "disabled"),
+    Output("select-sample-file", "disabled"),
+    Input("data-source", "value"),
+)
+def toggle_data_source(data_source):
+    return data_source != "upload", data_source != "sample"
+
+
+@callback(
     Output("data-stats-table", "children"),
     Output("data-state", "data"),
     Output("data-table", "children"),
@@ -58,13 +81,18 @@ def upload_file(filenames, contents):
     Output("data-exception-modal", "is_open"),
     Output("data-exception-modal-content", "children"),
     [Input("data-btn", "n_clicks"), Input("data-exception-modal-close", "n_clicks")],
-    [State("select-file", "value"), State("data-state", "data")],
+    [
+        State("data-source", "value"),
+        State("select-file", "value"),
+        State("select-sample-file", "value"),
+        State("data-state", "data"),
+    ],
     running=[(Output("data-btn", "disabled"), True, False), (Output("data-cancel-btn", "disabled"), False, True)],
     cancel=[Input("data-cancel-btn", "n_clicks")],
     background=True,
     manager=file_manager.get_long_callback_manager(),
 )
-def click_run(btn_click, modal_close, filename, data):
+def click_run(btn_click, modal_close, data_source, filename, sample_filename, data):
     ctx = dash.callback_context
     stats = json.loads(data) if data is not None else {}
 
@@ -77,8 +105,12 @@ def click_run(btn_click, modal_close, filename, data):
     prop_id = ctx.triggered_id
     if prop_id == "data-btn" and btn_click > 0:
         try:
-            assert filename, "Please select a file to load."
-            file_path = os.path.join(file_manager.data_directory, filename)
+            if data_source == "sample":
+                assert sample_filename, "Please select a sample file to load."
+                file_path = os.path.join(file_manager.sample_data_directory, sample_filename)
+            else:
+                assert filename, "Please select a file to load."
+                file_path = os.path.join(file_manager.data_directory, filename)
             df = DataAnalyzer().load_data(file_path)
             stats = DataAnalyzer.get_stats(df)
             stats_table = create_stats_table(stats)
