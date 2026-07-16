@@ -17,3 +17,4 @@ Icon?
 docs/build/*
 .ipynb_checkpoints
 venv/
+.venv312/
