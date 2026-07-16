@@ -27,6 +27,14 @@ It will also show some basic statistics, e.g., time series length, mean/std for 
 If you have already trained a model using the dashboard, you can select the model you want to download
 and click the download button. The model and its configuration file will be compressed into a zip file.
 
+Instead of uploading your own file every time, you can also load one of the sample datasets that ship
+with the repository. Use the **Data Source** radio button to switch between "Uploaded File" (the default,
+selecting from files you've uploaded to ``~/merlion/data``) and "Sample Data" (selecting from the CSV
+files under the repository's ``data`` folder, including its subfolders). Only the dropdown matching the
+selected Data Source is enabled at a time, and clicking the load button loads whichever file is selected
+in the active dropdown. The Sample Data dropdown lists files as paths relative to the ``data`` folder
+(e.g. ``walmart/train.csv``), so you can tell which subfolder a sample came from.
+
 The second tab is used to train a time series anomaly detection model:
 
 .. image:: _static/figures/dashboard_anomaly.png
