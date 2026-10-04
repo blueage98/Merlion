@@ -74,6 +74,18 @@ def toggle_data_source(data_source):
 
 
 @callback(
+    Output("select-file", "options", allow_duplicate=True),
+    Input("data-source", "value"),
+    prevent_initial_call=True,
+)
+def refresh_uploaded_files(data_source):
+    # Loading a sample file copies it into the data folder, so re-list the folder when switching back to uploads.
+    if data_source != "upload":
+        return dash.no_update
+    return [{"label": f, "value": f} for f in file_manager.uploaded_files()]
+
+
+@callback(
     Output("data-stats-table", "children"),
     Output("data-state", "data"),
     Output("data-table", "children"),
@@ -107,7 +119,8 @@ def click_run(btn_click, modal_close, data_source, filename, sample_filename, da
         try:
             if data_source == "sample":
                 assert sample_filename, "Please select a sample file to load."
-                file_path = os.path.join(file_manager.sample_data_directory, sample_filename)
+                filename = file_manager.copy_sample_file(sample_filename)
+                file_path = os.path.join(file_manager.data_directory, filename)
             else:
                 assert filename, "Please select a file to load."
                 file_path = os.path.join(file_manager.data_directory, filename)
