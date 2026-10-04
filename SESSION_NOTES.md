@@ -14,7 +14,6 @@
 
 ## 보류 중인 문제
 
-- **`.claude/settings.json` 권한 변경 (커밋 여부 결정 필요)**: 커밋된 버전은 `deny`에 `Bash(git commit:*)`와 `Bash(git push:*)`가 있어서 Claude의 커밋과 push를 막습니다. 작업 트리에서는 2026-10-05에 이 두 줄이 빠져 있지만(Claude가 바꾼 것이 아님), 팀 전체 정책이라 커밋하지 않았습니다. Claude의 커밋/push 권한은 개인용 `.claude/settings.local.json`(gitignore 처리)에 따로 허용해 두었습니다.
 
 - **`test_moving_average` 실패**: `tests/transform/test_moving_average.py::test_exponential_moving_average_ci`가 `KeyError: 1`로 실패합니다. 원래부터 있던 문제이고, pandas 3의 정수 라벨 인덱싱(`series[1]`) 문제로 추정합니다.
 - **Prophet 학습 오류**: `AttributeError: 'Prophet' object has no attribute 'stan_backend'`. 2026-10-05에 사용자가 처리하지 않기로 했습니다.
