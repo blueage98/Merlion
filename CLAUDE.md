@@ -70,3 +70,7 @@ New data loaders go in `ts_datasets/ts_datasets/anomaly` (labeled anomalies) or 
 ## Adding a New Model or Transform (docs)
 
 When adding a model/transform, in addition to code + tests, update the Sphinx docs: add the new module to the relevant `__init__.py` autosummary block (e.g. `merlion/models/anomaly/__init__.py`) and to the corresponding `docs/source/merlion.*.rst` file.
+
+## Session Handoff
+
+If `SESSION_NOTES.md` exists at the repo root, read it at the start of a session: it lists the next tasks, open decisions, and the current repo state left by the previous session (written by the `make_notes` skill).
