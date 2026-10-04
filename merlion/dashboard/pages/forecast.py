@@ -113,7 +113,54 @@ def create_control_panel() -> html.Div:
                 content_id="forecasting-exception-modal-content",
                 button_id="forecasting-exception-modal-close",
             ),
+            create_param_confirm_modal(),
+            # Starts training: set right away for most algorithms, or once the recommended settings are confirmed.
+            dcc.Store(id="forecasting-train-trigger"),
         ],
+    )
+
+
+def create_param_confirm_modal() -> html.Div:
+    """Popup showing the recommended LGBMForecaster settings, which must be confirmed before training starts."""
+    input_style = {"width": "100%"}
+    return html.Div(
+        [
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle("Recommended Settings")),
+                    dbc.ModalBody(
+                        [
+                            html.Div(id="forecasting-param-confirm-content"),
+                            html.Br(),
+                            html.P("Settings used for training (edit if needed):"),
+                            html.Label("maxlags"),
+                            dcc.Input(
+                                id="forecasting-confirm-maxlags", type="number", min=1, step=1, style=input_style
+                            ),
+                            html.Label("max_forecast_steps", style={"margin-top": "10px"}),
+                            dcc.Input(
+                                id="forecasting-confirm-max-forecast-steps",
+                                type="number",
+                                min=1,
+                                step=1,
+                                style=input_style,
+                            ),
+                            html.Div(id="forecasting-param-confirm-error", style={"color": "red", "margin-top": "10px"}),
+                        ]
+                    ),
+                    dbc.ModalFooter(
+                        [
+                            dbc.Button("Confirm", id="forecasting-param-confirm-btn", n_clicks=0),
+                            dbc.Button("Cancel", id="forecasting-param-cancel-btn", n_clicks=0, color="secondary"),
+                        ]
+                    ),
+                ],
+                id="forecasting-param-confirm-modal",
+                is_open=False,
+                backdrop="static",
+                size="lg",
+            )
+        ]
     )
 
 
