@@ -15,5 +15,4 @@
 ## 보류 중인 문제
 
 
-- **`test_moving_average` 실패**: `tests/transform/test_moving_average.py::test_exponential_moving_average_ci`가 `KeyError: 1`로 실패합니다. 원래부터 있던 문제이고, pandas 3의 정수 라벨 인덱싱(`series[1]`) 문제로 추정합니다.
 - **Prophet 학습 오류**: `AttributeError: 'Prophet' object has no attribute 'stan_backend'`. 2026-10-05에 사용자가 처리하지 않기로 했습니다.
