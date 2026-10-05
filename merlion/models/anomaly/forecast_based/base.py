@@ -57,7 +57,8 @@ class ForecastingDetectorBase(ForecasterBase, DetectorBase, metaclass=AutodocABC
         if stderr is None:
             return pd.DataFrame(y - yhat, index=times, columns=["anom_score"])
         else:
-            sigma = stderr.univariates[stderr.names[0]].np_values
+            # copy, since the values may be a read-only view of the data with pandas copy-on-write
+            sigma = stderr.univariates[stderr.names[0]].np_values.copy()
             if np.isnan(sigma).all():
                 sigma = 1
             else:

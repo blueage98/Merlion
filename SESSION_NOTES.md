@@ -14,5 +14,4 @@
 
 ## 보류 중인 문제
 
-
-- **Prophet 학습 오류**: `AttributeError: 'Prophet' object has no attribute 'stan_backend'`. 2026-10-05에 사용자가 처리하지 않기로 했습니다.
+(없음)
