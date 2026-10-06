@@ -10,9 +10,11 @@ import time
 import traceback
 
 import dash
-from dash import Input, Output, State, dcc, html, callback
+from dash import ALL, Input, Output, State, dcc, html, callback
 from merlion.dashboard.utils.file_manager import FileManager
 from merlion.dashboard.models.forecast import ForecastModel
+from merlion.dashboard.models.recommend import format_value, parse_confirmed_values
+from merlion.dashboard.pages.forecast import create_confirm_inputs
 from merlion.dashboard.pages.utils import create_param_table, create_metric_table, create_empty_figure
 
 logger = logging.getLogger(__name__)
@@ -165,61 +167,94 @@ def _load_train_test(filename, train_percentage, test_filename, file_mode):
     return train_df, test_df
 
 
+def _current_params(table):
+    return {p["Parameter"]: p["Value"] for p in table["props"]["data"] if p["Parameter"]}
+
+
 def _create_recommendation_content(rec, table):
-    current = {p["Parameter"]: p["Value"] for p in table["props"]["data"] if p["Parameter"]}
-    threshold, granularity = rec["acf_threshold"], rec["granularity"]
-    steps, maxlags, period = rec["max_forecast_steps"], rec["maxlags"], rec["period"]
-
-    if steps >= rec["max_lag_searched"]:
-        steps_basis = f"The autocorrelation (ACF) stays >= {threshold} over the whole searched range."
-    else:
-        steps_basis = (
-            f"The autocorrelation (ACF) stays >= {threshold} for {steps} steps. Beyond that, the recent history "
-            f"says little about the future and the autoregressive forecast errors compound."
-        )
-    if period is not None and maxlags == period:
-        maxlags_basis = (
-            f"Dominant seasonal period ({ForecastModel.steps_to_duration(period, granularity)}, "
-            f"ACF = {rec['period_acf']}), so the model sees one full cycle."
-        )
-    else:
-        maxlags_basis = (
-            f"No seasonal period with ACF >= {threshold} beyond the forecast horizon (searched up to "
-            f"{rec['max_lag_searched']} steps), so it covers the forecast horizon."
-        )
-
-    rows = [
-        ("maxlags", maxlags, maxlags_basis),
-        ("max_forecast_steps", steps, steps_basis),
-    ]
+    """The table of the recommended settings (`Recommendation`), with the current values and the reasoning."""
+    current = _current_params(table)
+    granularity = rec.granularity
     header = html.Tr([html.Th(c) for c in ["Parameter", "Current", "Recommended", "Duration", "Basis"]])
     body = [
         html.Tr(
             [
-                html.Td(name),
-                html.Td(current.get(name, "")),
-                html.Td(value),
-                html.Td(ForecastModel.steps_to_duration(value, granularity)),
-                html.Td(basis),
+                html.Td(p.name),
+                html.Td(current.get(p.name, "")),
+                html.Td(format_value(p.value)),
+                html.Td(
+                    ForecastModel.steps_to_duration(p.value, granularity)
+                    if p.is_steps and isinstance(p.value, int)
+                    else ""
+                ),
+                html.Td(p.basis),
             ]
         )
-        for name, value, basis in rows
+        for p in rec.params
     ]
-    return [
+    content = [
         html.P(
-            f"Computed from the training data: {rec['n_points']} points after resampling at a granularity of "
+            f"Computed from the training data: {rec.n_points} points after resampling at a granularity of "
             f"{ForecastModel.steps_to_duration(1, granularity)}."
         ),
         html.Table([header] + body, className="table table-sm"),
-        html.P("The test metrics are computed on the first max_forecast_steps points of the test data."),
     ]
+    content += [html.P(note) for note in rec.notes]
+    if any(p.name == "max_forecast_steps" for p in rec.params):
+        content.append(html.P("The test metrics are computed on the first max_forecast_steps points of the test data."))
+    return content
+
+
+def handle_train_settings(
+    prop_id, algorithm, table, load_train_df, target_col, feature_cols, specs, values, recommend=None
+):
+    """
+    The logic of `confirm_train_settings`, separated from Dash so that it can be tested.
+
+    :param prop_id: the id of the button that was clicked.
+    :param load_train_df: a function returning the training data (only called if a recommendation is needed).
+    :param specs: the specs of the recommended parameters shown in the popup.
+    :param values: the values of the popup's input fields, in the same order as ``specs``.
+    :param recommend: the function computing the `Recommendation` (default: `ForecastModel.recommend_params`).
+    :return: ``(popup is open, popup content, popup inputs, specs, error message, train trigger, param table)``,
+        with `dash.no_update` for the outputs that do not change.
+    """
+    no_update = dash.no_update
+    recommend = recommend or ForecastModel.recommend_params
+
+    if prop_id == "forecasting-train-btn":
+        if algorithm in ForecastModel.tuned_algorithms:
+            try:
+                rec = recommend(algorithm, load_train_df(), target_col, feature_cols)
+                content = _create_recommendation_content(rec, table)
+                inputs = create_confirm_inputs(rec.params)
+                specs = [p.spec() for p in rec.params]
+                return True, content, inputs, specs, "", no_update, no_update
+            except Exception:
+                # Start training anyway, so that any data error is reported in the exception modal as usual.
+                logger.warning(f"Could not recommend {algorithm} settings:\n{traceback.format_exc()}")
+        trigger = {"time": time.time(), "overrides": {}}
+        return False, no_update, no_update, no_update, "", trigger, no_update
+
+    if prop_id == "forecasting-param-confirm-btn":
+        overrides, errors = parse_confirmed_values(specs or [], values or [])
+        if errors:
+            return True, no_update, no_update, no_update, " ".join(errors), no_update, no_update
+        # Show the confirmed values in the algorithm setting table as well
+        params = {name: {"default": value} for name, value in _current_params(table).items()}
+        for name, value in overrides.items():
+            params[name] = {"default": format_value(value)}
+        trigger = {"time": time.time(), "overrides": overrides}
+        return False, no_update, no_update, no_update, "", trigger, create_param_table(params)
+
+    return False, no_update, no_update, no_update, "", no_update, no_update
 
 
 @callback(
     Output("forecasting-param-confirm-modal", "is_open"),
     Output("forecasting-param-confirm-content", "children"),
-    Output("forecasting-confirm-maxlags", "value"),
-    Output("forecasting-confirm-max-forecast-steps", "value"),
+    Output("forecasting-confirm-inputs", "children"),
+    Output("forecasting-confirm-specs", "data"),
     Output("forecasting-param-confirm-error", "children"),
     Output("forecasting-train-trigger", "data"),
     Output("forecasting-param-table", "children", allow_duplicate=True),
@@ -231,13 +266,15 @@ def _create_recommendation_content(rec, table):
     [
         State("forecasting-select-file", "value"),
         State("forecasting-select-target", "value"),
+        State("forecasting-select-features", "value"),
         State("forecasting-select-algorithm", "value"),
         State("forecasting-param-table", "children"),
         State("forecasting-training-slider", "value"),
         State("forecasting-select-test-file", "value"),
         State("forecasting-file-radio", "value"),
-        State("forecasting-confirm-maxlags", "value"),
-        State("forecasting-confirm-max-forecast-steps", "value"),
+        State("forecasting-confirm-specs", "data"),
+        State({"type": "forecasting-confirm-param", "name": ALL}, "value"),
+        State({"type": "forecasting-confirm-param", "name": ALL}, "id"),
     ],
     prevent_initial_call=True,
 )
@@ -247,46 +284,33 @@ def confirm_train_settings(
     cancel_clicks,
     filename,
     target_col,
+    feature_cols,
     algorithm,
     table,
     train_percentage,
     test_filename,
     file_mode,
-    maxlags,
-    max_forecast_steps,
+    specs,
+    values,
+    ids,
 ):
     """
     Runs before training. For the algorithms in `ForecastModel.tuned_algorithms`, opens a popup with the recommended
-    maxlags/max_forecast_steps and only starts training once they are confirmed. Other algorithms start right away.
+    settings and only starts training once they are confirmed. Other algorithms start right away.
     """
-    no_update = dash.no_update
-    prop_id = dash.callback_context.triggered_id
-
-    if prop_id == "forecasting-train-btn":
-        if algorithm in ForecastModel.tuned_algorithms:
-            try:
-                train_df, _ = _load_train_test(filename, train_percentage, test_filename, file_mode)
-                rec = ForecastModel.recommend_lgbm_params(train_df, target_col)
-                content = _create_recommendation_content(rec, table)
-                return True, content, rec["maxlags"], rec["max_forecast_steps"], "", no_update, no_update
-            except Exception:
-                # Start training anyway, so that the error is reported in the exception modal as usual.
-                logger.warning(f"Could not recommend {algorithm} settings:\n{traceback.format_exc()}")
-        trigger = {"time": time.time(), "overrides": {}}
-        return False, no_update, no_update, no_update, "", trigger, no_update
-
-    if prop_id == "forecasting-param-confirm-btn":
-        if not all(isinstance(v, int) and v >= 1 for v in [maxlags, max_forecast_steps]):
-            return True, no_update, no_update, no_update, "Both values must be positive integers.", no_update, no_update
-        overrides = {"maxlags": maxlags, "max_forecast_steps": max_forecast_steps}
-        # Show the confirmed values in the algorithm setting table as well
-        params = {p["Parameter"]: {"default": p["Value"]} for p in table["props"]["data"] if p["Parameter"]}
-        for name, value in overrides.items():
-            params[name] = {"default": value}
-        trigger = {"time": time.time(), "overrides": overrides}
-        return False, no_update, no_update, no_update, "", trigger, create_param_table(params)
-
-    return False, no_update, no_update, no_update, "", no_update, no_update
+    # Match the input values to the specs by parameter name, since Dash does not guarantee their order
+    by_name = {i["name"]: v for i, v in zip(ids or [], values or [])}
+    values = [by_name.get(spec["name"]) for spec in specs or []]
+    return handle_train_settings(
+        prop_id=dash.callback_context.triggered_id,
+        algorithm=algorithm,
+        table=table,
+        load_train_df=lambda: _load_train_test(filename, train_percentage, test_filename, file_mode)[0],
+        target_col=target_col,
+        feature_cols=feature_cols or [],
+        specs=specs,
+        values=values,
+    )
 
 
 @callback(

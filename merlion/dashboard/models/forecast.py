@@ -7,15 +7,18 @@
 import logging
 import sys
 
-import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 
-from merlion.models.automl.seasonality import SeasonalityLayer, PeriodicityStrategy
 from merlion.models.factory import ModelFactory
 from merlion.evaluate.forecast import ForecastEvaluator, ForecastMetric
-from merlion.transform.resample import TemporalResample
 from merlion.utils.time_series import TimeSeries
+from merlion.dashboard.models.recommend import (
+    RECOMMENDERS,
+    Recommendation,
+    SeriesStats,
+    lgbm_params,
+    steps_to_duration,
+)
 from merlion.dashboard.models.utils import ModelMixin, DataMixin
 from merlion.dashboard.utils.log import DashLogger
 
@@ -37,12 +40,38 @@ class ForecastModel(ModelMixin, DataMixin):
         "ExtraTreesForecaster",
     ]
 
-    # Algorithms whose maxlags/max_forecast_steps are recommended (and confirmed by the user) before training.
-    tuned_algorithms = ["LGBMForecaster"]
-    # Autocorrelation level below which the recent history is considered too weak to forecast from.
-    lgbm_acf_threshold = 0.5
-    # Upper bound on the recommended maxlags, which is also the number of lag features LightGBM is trained on.
+    # Algorithms whose hyperparameters are recommended (and confirmed by the user) before training.
+    tuned_algorithms = list(RECOMMENDERS)
+
+    # Settings of the recommenders (see merlion/dashboard/models/recommend.py).
+    # ACF level below which the recent history is considered too weak to forecast from (max_forecast_steps).
+    acf_threshold = 0.5
+    # Same threshold, under the name used by recommend_lgbm_params() before the other algorithms were added.
+    lgbm_acf_threshold = acf_threshold
+    # Upper bound on the lags searched for seasonal periods, which is also the maximum recommended maxlags.
     lgbm_max_lags = 2000
+    # Number of latest points the model-fitting searches (ARIMA/SARIMA orders, VAR order) are run on.
+    ic_max_points = 2000
+    # Maximum number of ARIMA models fitted by the stepwise order search (high orders take ~0.5s each to fit).
+    ic_max_fits = 15
+    # Longest seasonal period for which SARIMA gets a seasonal part. Fitting gets slower with the period: searching
+    # the seasonal orders takes ~4s for 24 (e.g. daily cycle of hourly data), ~15s for 48 and over a minute for 100.
+    sarima_max_period = 24
+    # Number of latest seasonal cycles the seasonal orders (P, Q) of SARIMA are searched on.
+    sarima_cycles = 20
+    # STL seasonal strength above which SARIMA gets a seasonal difference (D = 1), as in auto.arima.
+    sarima_seasonal_strength = 0.64
+    # STL trend strength from which ETS gets a (damped) trend.
+    ets_trend_strength = 0.5
+    # ETS seasonal period above which the recommendation warns that training can take very long (the fit time grows
+    # about 6x each time the period doubles: ~3s for 48 steps, ~13s for 96 and ~84s for 192 on 2000 points).
+    ets_slow_period = 48
+    # Spearman correlation between the seasonal amplitude and the level from which the seasonality is multiplicative.
+    multiplicative_min_corr = 0.5
+    # Minimum ACF at one calendar cycle for Prophet's yearly/weekly/daily seasonality, besides being significant.
+    prophet_min_acf = 0.1
+    # Maximum VAR order searched for VectorAR's maxlags.
+    var_max_lags = 20
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -54,67 +83,49 @@ class ForecastModel(ModelMixin, DataMixin):
         return ForecastModel.algorithms
 
     @staticmethod
+    def _series_stats(train_df, target_column):
+        return SeriesStats(train_df, target_column, max_lags=ForecastModel.lgbm_max_lags)
+
+    @staticmethod
+    def recommend_params(algorithm, train_df, target_column, feature_columns=None) -> Recommendation:
+        """
+        Recommends the hyperparameters of the given algorithm from the training data, with the reasoning behind
+        each value. See merlion/dashboard/models/recommend.py for the method used for each algorithm.
+
+        :raises ValueError: if the algorithm has no recommender, or no parameter could be recommended.
+        """
+        if algorithm not in RECOMMENDERS:
+            raise ValueError(f"No recommended settings for {algorithm}.")
+        stats = ForecastModel._series_stats(train_df, target_column)
+        rec = RECOMMENDERS[algorithm](algorithm, stats, ForecastModel, feature_columns=feature_columns)
+        if not rec.params:
+            raise ValueError(f"Could not recommend any setting for {algorithm}.")
+        return rec
+
+    @staticmethod
     def recommend_lgbm_params(train_df, target_column):
         """
         Recommends ``maxlags`` and ``max_forecast_steps`` for LGBMForecaster from the autocorrelation (ACF) of the
         target variable, after resampling the training data the same way the model does (``TemporalResample``).
 
         - ``max_forecast_steps``: LGBMForecaster forecasts autoregressively, so its errors compound with the horizon.
-          We stop right before the ACF first drops below ``lgbm_acf_threshold``, i.e. once the recent history no
+          We stop right before the ACF first drops below ``acf_threshold``, i.e. once the recent history no
           longer says much about the value being forecasted.
         - ``maxlags``: the dominant seasonal period, so that the model sees one full cycle. This is the significant
           seasonality with the highest ACF among those beyond ``max_forecast_steps`` (shorter lags have a high ACF
-          just because the series changes slowly), and its ACF must be at least ``lgbm_acf_threshold``. Like
+          just because the series changes slowly), and its ACF must be at least ``acf_threshold``. Like
           LGBMForecaster's own default, maxlags is at least ``max_forecast_steps``. The search is capped at
           ``lgbm_max_lags`` (and a quarter of the training data) to bound the number of features.
 
         :return: A dict with the recommended ``maxlags`` and ``max_forecast_steps``, plus the statistics they are
             based on (``period``, ``period_acf``, ``granularity``, ``n_points``, ``max_lag_searched``, ``acf_threshold``).
         """
-        if target_column not in train_df:
-            target_column = int(target_column)
-        assert target_column in train_df, f"The target variable {target_column} is not in the time series."
-
-        ts = TimeSeries.from_pd(train_df.loc[:, [target_column]])
-        resample = TemporalResample()
-        resample.train(ts)
-        x = resample(ts).to_pd().iloc[:, 0].values.astype(float)
-        assert len(x) >= 40, f"The training data is too short ({len(x)} points) to recommend LGBMForecaster settings."
-
-        threshold = ForecastModel.lgbm_acf_threshold
-        max_lag = min(len(x) // 4, ForecastModel.lgbm_max_lags)
-        acf = np.nan_to_num(sm.tsa.acf(x, nlags=max_lag, fft=True))
-
-        below = np.flatnonzero(acf[1:] < threshold)
-        max_forecast_steps = int(below[0]) if len(below) > 0 else max_lag
-        max_forecast_steps = max(max_forecast_steps, 1)
-
-        period = None
-        if np.std(x) > 0:
-            periods = SeasonalityLayer.detect_seasonality(
-                x, max_lag=max_lag, pval=0.01, periodicity_strategy=PeriodicityStrategy.All
-            )
-            strong = [p for p in periods if max_forecast_steps < p <= max_lag and acf[p] >= threshold]
-            period = max(strong, key=lambda p: acf[p]) if strong else None
-
-        maxlags = max(period or 1, max_forecast_steps, min(20, max_lag))
-        return {
-            "maxlags": int(maxlags),
-            "max_forecast_steps": int(max_forecast_steps),
-            "period": None if period is None else int(period),
-            "period_acf": None if period is None else round(float(acf[period]), 3),
-            "granularity": resample.granularity,
-            "n_points": len(x),
-            "max_lag_searched": int(max_lag),
-            "acf_threshold": threshold,
-        }
+        return lgbm_params(ForecastModel._series_stats(train_df, target_column), ForecastModel.acf_threshold)
 
     @staticmethod
     def steps_to_duration(steps, granularity):
         """Converts a number of time steps at the given granularity into a human-readable duration."""
-        if isinstance(granularity, (int, float)):
-            return str(pd.Timedelta(seconds=steps * granularity))
-        return f"{steps} x {granularity}"
+        return steps_to_duration(steps, granularity)
 
     @staticmethod
     def _compute_metrics(evaluator, ts, predictions):

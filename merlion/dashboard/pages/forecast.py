@@ -121,8 +121,10 @@ def create_control_panel() -> html.Div:
 
 
 def create_param_confirm_modal() -> html.Div:
-    """Popup showing the recommended LGBMForecaster settings, which must be confirmed before training starts."""
-    input_style = {"width": "100%"}
+    """
+    Popup showing the recommended settings of the selected algorithm, which must be confirmed before training starts.
+    The input fields depend on the algorithm: they are created by `create_confirm_inputs` when the popup opens.
+    """
     return html.Div(
         [
             dbc.Modal(
@@ -133,18 +135,9 @@ def create_param_confirm_modal() -> html.Div:
                             html.Div(id="forecasting-param-confirm-content"),
                             html.Br(),
                             html.P("Settings used for training (edit if needed):"),
-                            html.Label("maxlags"),
-                            dcc.Input(
-                                id="forecasting-confirm-maxlags", type="number", min=1, step=1, style=input_style
-                            ),
-                            html.Label("max_forecast_steps", style={"margin-top": "10px"}),
-                            dcc.Input(
-                                id="forecasting-confirm-max-forecast-steps",
-                                type="number",
-                                min=1,
-                                step=1,
-                                style=input_style,
-                            ),
+                            html.Div(id="forecasting-confirm-inputs"),
+                            # The specs of the recommended parameters, used to validate the confirmed values
+                            dcc.Store(id="forecasting-confirm-specs"),
                             html.Div(id="forecasting-param-confirm-error", style={"color": "red", "margin-top": "10px"}),
                         ]
                     ),
@@ -206,3 +199,36 @@ def create_forecasting_layout() -> html.Div:
             html.Div(className="nine columns", children=create_right_column()),
         ],
     )
+
+
+def create_confirm_input(spec: dict, value) -> html.Div:
+    """
+    The input field of one recommended parameter in the confirmation popup, pre-filled with ``value``: a number
+    input for integers, a dropdown for choices, and a text input for tuples and strings.
+
+    :param spec: the parameter's spec, see `merlion.dashboard.models.recommend.ParamRecommendation.spec`.
+    """
+    component_id = {"type": "forecasting-confirm-param", "name": spec["name"]}
+    style = {"width": "100%"}
+    if spec["kind"] == "int":
+        component = dcc.Input(id=component_id, type="number", min=1, step=1, value=value, style=style)
+    elif spec["kind"] == "choice":
+        options = [{"label": c, "value": c} for c in spec["choices"]]
+        component = dcc.Dropdown(id=component_id, options=options, value=str(value), clearable=False, style=style)
+    else:
+        component = dcc.Input(id=component_id, type="text", value=value, style=style)
+    return html.Div([html.Label(spec["name"]), component], style={"margin-top": "10px"})
+
+
+def create_confirm_inputs(params) -> list:
+    """The input fields of all the recommended parameters (`ParamRecommendation`s), in order."""
+    from merlion.dashboard.models.recommend import format_value
+
+    inputs = []
+    for p in params:
+        if p.kind == "int_tuple" or p.kind == "str":
+            value = format_value(p.value)
+        else:
+            value = p.value
+        inputs.append(create_confirm_input(p.spec(), value))
+    return inputs
