@@ -1,8 +1,4 @@
 {
-  "enabledPlugins": {
-    "pyright-lsp@claude-plugins-official": true,
-    "claude-md-management@claude-plugins-official": true
-  },
   "permissions": {
     "allow": [
       "Read",
@@ -16,6 +12,13 @@
       "Bash(git log)",
       "Bash(git log:*)"
     ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(npm publish:*)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "WebFetch"
+    ],
     "ask": [
       "Bash(npm install)",
       "Bash(npm install:*)",
@@ -23,15 +26,10 @@
       "Edit(.env.*)",
       "Bash(git checkout)",
       "Bash(git checkout:*)"
-    ],
-    "deny": [
-      "Bash(rm -rf:*)",
-      "Bash(git push:*)",
-      "Bash(git commit:*)",
-      "Bash(npm publish:*)",
-      "Read(.env)",
-      "Read(.env.*)",
-      "WebFetch"
     ]
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "claude-md-management@claude-plugins-official": true
   }
 }

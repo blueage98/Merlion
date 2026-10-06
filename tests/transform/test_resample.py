@@ -12,6 +12,7 @@ import unittest
 
 from merlion.utils import TimeSeries, UnivariateTimeSeries
 from merlion.transform.resample import Shingle, TemporalResample
+from merlion.utils.resample import MONTH_END
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,13 @@ class TestResample(unittest.TestCase):
         transform = TemporalResample()
         transform.train(train)
         granularity = TemporalResample(granularity=granularity).granularity
-        if str(transform.granularity)[-1] == "E":
-            transform.granularity = str(transform.granularity)[:-1]
-        if str(granularity)[-1] == "E":
-            granularity = str(granularity)[:-1]
-        
-        self.assertEqual(transform.granularity, granularity)
+
+        # Compare month-end granularities independently of the pandas alias ("2M" vs. "2ME"), without modifying the
+        # transform's own granularity, which must remain parseable by the installed pandas version.
+        def normalize(g):
+            return str(g)[:-1] if str(g)[-1] == "E" else g
+
+        self.assertEqual(normalize(transform.granularity), normalize(granularity))
 
         # Make sure the resampled values are correct
         resampled_test = transform(test).to_pd()["value"]
@@ -55,15 +57,32 @@ class TestResample(unittest.TestCase):
         logger.info("Testing start-of-month resampling with an offset...")
         self._test_granularity(granularity="2MS", offset=pd.Timedelta(days=3, hours=6, minutes=30))
         logger.info("Testing end-of-month resampling...")
-        self._test_granularity(granularity="2M")
+        self._test_granularity(granularity=f"2{MONTH_END}")
         logger.info("Testing end-of-month resampling...")
-        self._test_granularity(granularity="2M", offset=-pd.Timedelta(days=7, hours=7))
+        self._test_granularity(granularity=f"2{MONTH_END}", offset=-pd.Timedelta(days=7, hours=7))
 
     def test_yearly(self):
         logger.info("Testing start-of-year resampling...")
         self._test_granularity(granularity="12MS", offset=pd.to_timedelta(0))
         logger.info("Testing end-of-year resampling...")
-        self._test_granularity(granularity="12M", offset=pd.to_timedelta(0))
+        self._test_granularity(granularity=f"12{MONTH_END}", offset=pd.to_timedelta(0))
+
+    def test_irregular_millisecond_timestamps(self):
+        # Mirrors data/example.csv: 1-minute data parsed from epoch millis (datetime64[ms]) with a few gaps,
+        # so pd.infer_freq() fails and infer_granularity() falls back to the most common timedelta.
+        index = pd.date_range("2020-03-02 09:12", periods=500, freq="1min").as_unit("ms")
+        df = pd.DataFrame({"value": np.arange(len(index), dtype=float)}, index=index)
+        df = df.drop(index[[10, 11, 12, 100, 200, 201, 202, 203]])
+        self.assertIsNone(pd.infer_freq(df.index))
+
+        transform = TemporalResample()
+        transform.train(TimeSeries.from_pd(df))
+        self.assertEqual(pd.to_timedelta(transform.granularity, unit="s"), pd.Timedelta(minutes=1))
+
+        # the missing time stamps are filled back in by interpolation
+        resampled = transform(TimeSeries.from_pd(df)).to_pd()
+        self.assertSequenceEqual(resampled.index.to_list(), index.to_list())
+        self.assertSequenceEqual(resampled["value"].tolist(), np.arange(len(index), dtype=float).tolist())
 
 
 class TestShingle(unittest.TestCase):

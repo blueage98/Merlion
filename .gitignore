@@ -18,3 +18,5 @@ docs/build/*
 .ipynb_checkpoints
 venv/
 .venv312/
+# Claude Code personal settings
+.claude/settings.local.json

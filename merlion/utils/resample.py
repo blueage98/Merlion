@@ -17,9 +17,21 @@ from typing import Iterable, Sequence, Union
 import numpy as np
 import pandas as pd
 from pandas.tseries.frequencies import to_offset as pd_to_offset
-import scipy.stats
 
 logger = logging.getLogger(__name__)
+
+
+def _month_end_alias():
+    """pandas 2.2 renamed the month-end offset alias from "M" to "ME", and pandas 3 no longer accepts "M"."""
+    try:
+        pd_to_offset("ME")
+        return "ME"
+    except ValueError:
+        return "M"
+
+
+MONTH_END = _month_end_alias()
+"""The month-end offset alias supported by the installed pandas version ("ME" or "M")."""
 
 
 class AlignPolicy(Enum):
@@ -152,12 +164,15 @@ def infer_granularity(time_stamps, return_offset=False):
         return (freq, offset) if return_offset else freq
 
     # Otherwise, start with the most commonly occurring timedelta
-    dt = pd.to_timedelta(scipy.stats.mode(orig_t[1:] - orig_t[:-1], axis=None)[0].item())
+    # Original implementation, kept for reference. Newer scipy (e.g. 1.17) raises DTypePromotionError in
+    # scipy.stats.mode() on timedelta64 inputs, so we use pandas' mode instead (which also preserves the time unit).
+    # dt = pd.to_timedelta(scipy.stats.mode(orig_t[1:] - orig_t[:-1], axis=None)[0].item())
+    dt = pd.Series(orig_t[1:] - orig_t[:-1]).mode().iloc[0]
 
     # Check if the data could be sampled at a k-monthly granularity.
     candidate_freqs = [dt]
     for k in range(math.ceil(dt / pd.Timedelta(days=31)), math.ceil(dt / pd.Timedelta(days=28))):
-        candidate_freqs.extend([pd_to_offset(f"{k}MS"), pd_to_offset(f"{k}M")])
+        candidate_freqs.extend([pd_to_offset(f"{k}MS"), pd_to_offset(f"{k}{MONTH_END}")])
 
     # Pick the sampling frequency which has the most overlap with the actual timestamps
     freq2idx = {f: pd.date_range(start=orig_t[0], end=orig_t[-1], freq=f) for f in candidate_freqs}

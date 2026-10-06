@@ -185,7 +185,7 @@ class ExponentialMovingAverage(InvertibleTransformBase):
             new_vars[name] = UnivariateTimeSeries.from_pd(ema)
             if self.ci:
                 ems = emw.std()
-                ems[0] = ems[1]
+                ems.iloc[0] = ems.iloc[1]
                 new_vars[f"{name}_lb"] = UnivariateTimeSeries.from_pd(ema + norm.ppf(0.5 * (1 - self.p)) * ems)
                 new_vars[f"{name}_ub"] = UnivariateTimeSeries.from_pd(ema + norm.ppf(0.5 * (1 + self.p)) * ems)
 

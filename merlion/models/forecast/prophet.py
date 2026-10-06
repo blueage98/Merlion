@@ -25,6 +25,33 @@ from merlion.utils import TimeSeries, UnivariateTimeSeries, to_pd_datetime, to_t
 logger = logging.getLogger(__name__)
 
 
+def _add_tbb_to_path():
+    """
+    On Windows, cmdstanpy checks whether ``tbb.dll`` is on the ``PATH`` by running ``where.exe tbb.dll``, and adds
+    the TBB bundled with Stan to the ``PATH`` if not. On non-English Windows, ``where.exe`` reports a missing file in
+    the local code page (e.g. CP949), which cmdstanpy fails to decode as UTF-8. Prophet then hides this error as
+    ``AttributeError: 'Prophet' object has no attribute 'stan_backend'``. We avoid it by adding the TBB bundled with
+    Prophet's CmdStan to the ``PATH`` up front, so that ``where.exe`` finds it.
+    """
+    if os.name != "nt":
+        return
+    tbb_dir = os.environ.get("STAN_TBB")
+    if tbb_dir is None:
+        stan_model_dir = os.path.join(os.path.dirname(prophet.__file__), "stan_model")
+        if not os.path.isdir(stan_model_dir):
+            return
+        cmdstan_dirs = [d for d in os.listdir(stan_model_dir) if d.startswith("cmdstan-")]
+        if not cmdstan_dirs:
+            return
+        tbb_dir = os.path.join(stan_model_dir, sorted(cmdstan_dirs)[-1], "stan", "lib", "stan_math", "lib", "tbb")
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    if os.path.isfile(os.path.join(tbb_dir, "tbb.dll")) and tbb_dir not in paths:
+        os.environ["PATH"] = os.pathsep.join([tbb_dir] + paths)
+
+
+_add_tbb_to_path()
+
+
 class _suppress_stdout_stderr(object):
     """
     A context manager for doing a "deep suppression" of stdout and stderr in

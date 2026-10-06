@@ -6,6 +6,7 @@
 #
 import os
 import base64
+import shutil
 import zipfile
 import diskcache
 from pathlib import Path
@@ -59,6 +60,20 @@ class FileManager(SingletonClass):
                         full_path = os.path.join(dirpath, filename)
                         files.append(os.path.relpath(full_path, root).replace(os.sep, "/"))
         return sorted(files)
+
+    def copy_sample_file(self, relpath):
+        """Copies a sample data file into the data folder so the other tabs can use it.
+
+        :param relpath: The path of the sample file relative to ``sample_data_directory``.
+        :return: The name of the copied file in the data folder.
+        """
+        root = os.path.realpath(self.sample_data_directory)
+        src = os.path.realpath(os.path.join(root, relpath))
+        assert os.path.commonpath([root, src]) == root, f"Invalid sample file path: {relpath}"
+        assert os.path.isfile(src), f"Sample file {relpath} does not exist."
+        name = os.path.basename(src)
+        shutil.copyfile(src, os.path.join(self.data_folder, name))
+        return name
 
     def get_model_download_path(self, model_name):
         path = os.path.join(self.model_folder, model_name)
