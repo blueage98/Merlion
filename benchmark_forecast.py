@@ -666,10 +666,14 @@ def main():
             f"script on the dataset with specific algorithms "
             f"before trying to summarize their results."
         )
+    # The dataset name of a CustomDataset contains a path separator ("\" on Windows), so match it literally on paths
+    # with forward slashes
+    name_re = re.escape(dataset_name.replace(os.sep, "/"))
     for csv in sorted(csvs):
-        basename = re.search(f"{dataset_name}.*\\.csv", csv).group(0)
-        model_name = os.path.basename(os.path.dirname(csv[: -len(basename)]))
-        suffix = re.search(f"(?<={dataset_name}).*(?=\\.csv)", basename).group(0)
+        csv_path = csv.replace(os.sep, "/")
+        basename = re.search(f"{name_re}.*\\.csv", csv_path).group(0)
+        model_name = os.path.basename(os.path.dirname(csv_path[: -len(basename)]))
+        suffix = re.search(f"(?<={name_re}).*(?=\\.csv)", basename).group(0)
         try:
             name2df[model_name + suffix] = pd.read_csv(csv)
         except Exception as e:
