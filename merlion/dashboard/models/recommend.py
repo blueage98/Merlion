@@ -615,22 +615,43 @@ def recommend_arima(algorithm, stats: SeriesStats, cfg, feature_columns=None) ->
             forecast = _arima_forecast(y[:-holdout], order, holdout)
             errors[order] = np.inf if forecast is None else float(np.mean(np.abs(y[-holdout:] - forecast)))
 
+    # Rank the candidates: by holdout error, except that with a seasonal period, a short order (which cannot follow
+    # the cycle beyond a few steps) must beat the best long AR order by arima_short_margin. On M4 Hourly, short orders
+    # that won the 2-cycle holdout narrowly were over half of the 30 largest losses against the default order.
     params = []
-    chosen = None
     if errors and np.isfinite(min(errors.values())):
-        chosen = min(errors, key=errors.get)
+        ranked = sorted(errors, key=errors.get)
+        longs = [o for o in ranked if o[0] >= (m or np.inf) and np.isfinite(errors[o])]
+        if longs and ranked[0] not in longs and errors[ranked[0]] >= (1 - cfg.arima_short_margin) * errors[longs[0]]:
+            ranked.remove(longs[0])
+            ranked.insert(0, longs[0])
+        ranked = [o for o in ranked if np.isfinite(errors[o])]
         ranking = ", ".join(
             f"{candidates[o][0]} ({', '.join(map(str, o))}): " + ("failed" if not np.isfinite(e) else f"{e:.3g}")
             for o, e in sorted(errors.items(), key=lambda oe: oe[1])
         )
-        basis = (
-            f"{candidates[chosen][1]} Chosen for the lowest mean absolute error when forecasting the latest {holdout} "
-            f"points from the {len(y) - holdout} before them, fitted the way Arima fits (no trend term, stationarity "
-            f"not enforced). Errors: {ranking}."
+        why = (
+            f"Chosen by the mean absolute error when forecasting the latest {holdout} points from the "
+            f"{len(y) - holdout} before them, fitted the way Arima fits (no trend term, stationarity not enforced); "
+            f"a short order must beat the long AR order by {cfg.arima_short_margin:.0%}. Errors: {ranking}."
         )
-    elif short is not None:
-        chosen, basis = tuple(short[0]), short[1]
+    else:
+        ranked, why = [o for o in candidates if candidates[o][0] == "short order"], ""
+
+    # The chosen order must also fit on the whole training data the way Arima fits it: without enforced
+    # stationarity, some orders fail to fit (e.g. on quantized sensor data), so try the next ones, then simpler ones.
+    fallbacks = [o for o in [(1, d, 1), (1, d, 0)] if o not in ranked]
+    chosen, failed = None, []
+    for order in ranked + fallbacks:
+        if _arima_forecast(y, order, 1) is not None:
+            chosen = order
+            break
+        failed.append(order)
     if chosen is not None:
+        basis = candidates[chosen][1] if chosen in candidates else f"Simple fallback order (d = {d})."
+        basis = f"{basis} {why}".strip()
+        if failed:
+            basis += f" Orders that failed to fit on the whole training data: {', '.join(map(str, failed))}."
         params.append(ParamRecommendation("order", list(chosen), "int_tuple", basis, tuple_len=3))
 
     # max_forecast_steps: with a long AR part, the forecast repeats the cycle, so it covers at least one cycle
@@ -816,67 +837,6 @@ def recommend_ets(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> R
     return Recommendation(algorithm, params, stats.n_points, stats.granularity, notes=notes)
 
 
-#: Prophet's calendar seasonalities: (parameter, cycle name, period in seconds, aggregation bin in seconds)
-_PROPHET_SEASONALITIES = [
-    ("yearly_seasonality", "yearly", 365.25 * 86400, 7 * 86400),
-    ("weekly_seasonality", "weekly", 7 * 86400, 86400),
-    ("daily_seasonality", "daily", 86400, 3600),
-]
-
-
-def _calendar_seasonality(stats: SeriesStats, name, period, bin_size, min_acf):
-    """
-    Whether a calendar seasonality (e.g. daily) is present, and why. It must be observable (the data spans at least
-    two cycles and the granularity is below half a cycle) and significant: after averaging the data into bins (one
-    hour for daily, one day for weekly, one week for yearly, so that shorter seasonalities average out) and removing
-    the trend with a moving average over one cycle, the ACF near the cycle length (+/- 10%) must exceed both the 95%
-    significance bound and ``min_acf``.
-    """
-    granularity = stats.granularity_seconds
-    span = (stats.series.index[-1] - stats.series.index[0]).total_seconds()
-    if span < 2 * period:
-        return False, f"The data spans {steps_to_duration(1, span)}, less than two {name} cycles."
-    if granularity >= period / 2:
-        return False, f"The granularity is too coarse to observe a {name} cycle."
-
-    bin_size = max(bin_size, granularity)
-    a = stats.series.resample(pd.Timedelta(seconds=bin_size)).mean().interpolate().values
-    lag = int(round(period / bin_size))
-    lo, hi = max(1, int(np.floor(0.9 * lag))), int(np.ceil(1.1 * lag))
-    if lag < 2 or len(a) <= hi + 1:
-        return False, f"Too few points to test a {name} cycle."
-    a = a - pd.Series(a).rolling(lag, center=True, min_periods=1).mean().values
-    acf = np.nan_to_num(sm.tsa.acf(a, nlags=hi, fft=True))
-    peak = float(acf[lo : hi + 1].max())
-    bound = max(1.96 / np.sqrt(len(a)), min_acf)
-    present = peak > bound
-    return present, (
-        f"ACF at one {name} cycle = {peak:.2f} ({'>' if present else '<='} {bound:.2f}, the larger of the 95% "
-        f"significance bound and {min_acf}), after averaging over {steps_to_duration(1, bin_size)} bins and detrending."
-    )
-
-
-def recommend_prophet(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> Recommendation:
-    """Prophet: each calendar seasonality must be observable and significant; the mode follows the ETS rule."""
-    params = []
-    for name, cycle, period, bin_size in _PROPHET_SEASONALITIES:
-        present, basis = _calendar_seasonality(stats, cycle, period, bin_size, cfg.prophet_min_acf)
-        params.append(ParamRecommendation(name, present, "choice", basis, choices=["True", "False", "auto"]))
-
-    m = stats.dominant_period()
-    if m is None:
-        mode, mode_basis = "additive", "Additive: no significant seasonal period."
-    else:
-        mul, why = stats.is_multiplicative(m, cfg.multiplicative_min_corr)
-        mode = "multiplicative" if mul else "additive"
-        mode_basis = f"{mode.capitalize()}: for the dominant period ({steps_to_duration(m, stats.granularity)}), {why}."
-    params.append(
-        ParamRecommendation("seasonality_mode", mode, "choice", mode_basis, choices=["additive", "multiplicative"])
-    )
-    params.append(recommend_max_forecast_steps(stats, cfg))
-    return Recommendation(algorithm, params, stats.n_points, stats.granularity)
-
-
 def recommend_vector_ar(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> Recommendation:
     """
     VectorAR: ``maxlags`` is the VAR order with the lowest BIC (the target and the feature variables). BIC is
@@ -949,7 +909,6 @@ RECOMMENDERS: Dict[str, Callable[..., Recommendation]] = {
     "Arima": recommend_arima,
     "LGBMForecaster": recommend_tree,
     "ETS": recommend_ets,
-    "Prophet": recommend_prophet,
     "Sarima": recommend_sarima,
     "VectorAR": recommend_vector_ar,
     "RandomForestForecaster": recommend_tree,

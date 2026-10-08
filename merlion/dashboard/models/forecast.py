@@ -65,6 +65,9 @@ class ForecastModel(ModelMixin, DataMixin):
     # seasonal period).
     arima_holdout_cycles = 2
     arima_holdout_steps = 24
+    # With a seasonal period, a short ARIMA order is only chosen if its holdout error is this much lower than that
+    # of the long AR order (short orders that won the holdout narrowly generalized poorly on M4 Hourly).
+    arima_short_margin = 0.2
     # Longest seasonal period for which SARIMA gets a seasonal part. Fitting gets slower with the period: searching
     # the seasonal orders takes ~4s for 24 (e.g. daily cycle of hourly data), ~15s for 48 and over a minute for 100.
     sarima_max_period = 24
@@ -80,8 +83,6 @@ class ForecastModel(ModelMixin, DataMixin):
     ets_min_acf = 0.3
     # Spearman correlation between the seasonal amplitude and the level from which the seasonality is multiplicative.
     multiplicative_min_corr = 0.5
-    # Minimum ACF at one calendar cycle for Prophet's yearly/weekly/daily seasonality, besides being significant.
-    prophet_min_acf = 0.1
     # Maximum VAR order searched for VectorAR's maxlags.
     var_max_lags = 20
     # Estimated training time (in seconds) above which training only starts once the user approves it. The service

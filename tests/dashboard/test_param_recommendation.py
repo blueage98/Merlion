@@ -106,7 +106,6 @@ def test_tuned_algorithms_are_registered():
         "Arima",
         "LGBMForecaster",
         "ETS",
-        "Prophet",
         "Sarima",
         "VectorAR",
         "RandomForestForecaster",
@@ -114,6 +113,8 @@ def test_tuned_algorithms_are_registered():
     }
     assert "AutoETS" not in ForecastModel.tuned_algorithms
     assert "AutoProphet" not in ForecastModel.tuned_algorithms
+    # Prophet's own "auto" seasonalities did better than the recommended ones (see the spec)
+    assert "Prophet" not in ForecastModel.tuned_algorithms
     with pytest.raises(ValueError):
         ForecastModel.recommend_params("AutoETS", _df(_white_noise()), "value")
 
@@ -200,7 +201,7 @@ def test_arima_models_a_short_seasonal_period_with_a_long_ar_part():
     assert params["order"][0] >= 24 and params["order"][2] == 0
     assert params["max_forecast_steps"] >= 24
     basis = rec.params[0].basis
-    assert "long AR order" in basis and "lowest mean absolute error" in basis
+    assert "long AR order" in basis and "mean absolute error" in basis
     assert not any("seasonal period" in n for n in rec.notes)
 
 
@@ -210,6 +211,22 @@ def test_arima_holdout_rules_out_orders_that_do_not_forecast():
     rec = ForecastModel.recommend_params("Arima", _df(100 + _ar([0.6, 0.3])), "value")
     assert _params(rec)["order"][1] == 1
     assert "short order (" in rec.params[0].basis  # the d = 0 candidate was compared and lost
+
+
+def test_arima_order_that_fails_to_fit_is_replaced(monkeypatch):
+    # Without enforced stationarity, some orders fail to fit on the whole data (e.g. on quantized sensor data):
+    # the next candidates, then simpler orders are tried
+    import merlion.dashboard.models.recommend as recommend
+
+    fit = recommend._arima_forecast
+    monkeypatch.setattr(
+        recommend,
+        "_arima_forecast",
+        lambda y, order, steps: fit(y, order, steps) if tuple(order) == (1, 1, 0) else None,
+    )
+    rec = ForecastModel.recommend_params("Arima", _df(np.cumsum(_white_noise(n=2000))), "value")
+    assert _params(rec)["order"] == [1, 1, 0]
+    assert "failed to fit on the whole training data" in rec.params[0].basis
 
 
 def test_arima_notes_unmodeled_seasonality():
@@ -352,27 +369,6 @@ def test_ets_trains_with_recommended_settings(set_progress):
     )
     assert model.config.seasonal_periods == 12
     assert np.isfinite(test_metrics["RMSE"])
-
-
-# --- Prophet ----------------------------------------------------------------------------------------------------------
-
-
-def test_prophet_calendar_seasonalities():
-    # 8 weeks of hourly data with a daily cycle
-    rec = ForecastModel.recommend_params("Prophet", _df(_sine(period=24, n_periods=56)), "value")
-    params = _params(rec)
-    assert params["daily_seasonality"] is True
-    assert params["yearly_seasonality"] is False
-    assert params["seasonality_mode"] == "additive"
-    basis = {p.name: p.basis for p in rec.params}
-    assert "less than two yearly cycles" in basis["yearly_seasonality"]
-
-
-def test_prophet_daily_seasonality_not_observable_on_daily_data():
-    rec = ForecastModel.recommend_params("Prophet", _df(_white_noise(n=800), freq="D"), "value")
-    params = _params(rec)
-    assert params["daily_seasonality"] is False
-    assert params["weekly_seasonality"] is False
 
 
 # --- VectorAR ---------------------------------------------------------------------------------------------------------

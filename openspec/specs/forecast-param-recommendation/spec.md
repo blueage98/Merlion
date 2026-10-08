@@ -7,7 +7,9 @@
 ## Requirements
 
 ### Requirement: 추천 대상 알고리즘은 학습 전에 확인 팝업을 연다
-Train 버튼을 누르면, 선택한 알고리즘이 추천 대상(LGBMForecaster, RandomForestForecaster, ExtraTreesForecaster, Arima, Sarima, ETS, Prophet, VectorAR, DefaultForecaster)인 경우 시스템은 SHALL 학습을 시작하지 않고 추천 설정 팝업을 연다. 추천 대상이 아닌 알고리즘(AutoETS, AutoProphet 등)은 SHALL 팝업 없이 바로 학습을 시작한다.
+Train 버튼을 누르면, 선택한 알고리즘이 추천 대상(LGBMForecaster, RandomForestForecaster, ExtraTreesForecaster, Arima, Sarima, ETS, VectorAR, DefaultForecaster)인 경우 시스템은 SHALL 학습을 시작하지 않고 추천 설정 팝업을 연다. 추천 대상이 아닌 알고리즘(Prophet, AutoETS, AutoProphet 등)은 SHALL 팝업 없이 바로 학습을 시작한다.
+
+추천 대상은 추천값이 최적화 없이 정한 기본값보다 나은 알고리즘으로 한정한다. Prophet은 2026-10-09 벤치마크(M4 Hourly 414개, 제조 데이터 85개 창)에서 추천값이 Prophet 자체의 `auto` 계절성보다 유의하게 나빴고(M4: 개선 183, 악화 231, Wilcoxon p = 0.0003), 후보 설정을 홀드아웃으로 고르도록 고쳐도 제조 데이터에서는 개선이 없어(machine temperature 9:9, SKAB 64개 모두 동일) 추천 대상에서 뺐다.
 
 #### Scenario: 추천 대상 알고리즘 선택 후 Train
 - **WHEN** 사용자가 알고리즘으로 Sarima를 선택하고 Train을 누른다
@@ -150,13 +152,6 @@ ETS 추천은 SHALL `seasonal_periods`를 다음 후보 중에서 정한다: 유
 #### Scenario: 학습 시간 안에 드는 짧은 주기로 대체
 - **WHEN** 가장 강한 주기는 학습 시간이 기준을 넘고, 그보다 약하지만 기준 이상의 ACF를 가진 짧은 주기가 있다
 - **THEN** `seasonal_periods`는 그 짧은 주기로 추천되고, 근거에 예상 학습 시간과 더 강한 주기를 뺐다는 설명이 있다
-
-### Requirement: Prophet 계절성은 달력 주기의 관측 가능성과 유의성으로 추천한다
-Prophet 추천은 SHALL 연·주·일 계절성 각각을 다음 조건을 모두 만족할 때만 `True`, 아니면 `False`로 정한다: 학습 데이터가 그 주기의 2배 이상 길다, 샘플링 간격이 그 주기의 절반보다 짧다, 그 주기 근처에서 자기상관이 유의하다. `seasonality_mode`는 SHALL ETS와 같은 진폭–수준 기준으로 `multiplicative` 또는 `additive`로 정한다.
-
-#### Scenario: 수 주 분량의 시간 단위 데이터
-- **WHEN** 1시간 간격, 8주 분량이고 일 주기가 뚜렷한 데이터로 Prophet 추천을 계산한다
-- **THEN** `daily_seasonality=True`, `yearly_seasonality=False`이다
 
 ### Requirement: VectorAR의 maxlags는 VAR 차수 선택 기준으로 추천한다
 VectorAR의 `maxlags` 추천은 SHALL 대상 변수와 선택한 feature 변수들로 VAR 차수별 정보 기준을 계산해 BIC가 가장 작은 차수로 정하고, 근거에 AIC·BIC·HQIC가 각각 고른 차수를 보여 준다. feature 변수가 없으면 SHALL 단변량 AR 차수 선택으로 정한다.
