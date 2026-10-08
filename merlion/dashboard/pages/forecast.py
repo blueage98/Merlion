@@ -114,7 +114,12 @@ def create_control_panel() -> html.Div:
                 button_id="forecasting-exception-modal-close",
             ),
             create_param_confirm_modal(),
-            # Starts training: set right away for most algorithms, or once the recommended settings are confirmed.
+            create_long_train_modal(),
+            # Requests training: set right away for most algorithms, or once the recommended settings are confirmed.
+            dcc.Store(id="forecasting-train-request"),
+            # A request whose estimated training time is long, waiting for the user's approval
+            dcc.Store(id="forecasting-pending-train"),
+            # Starts training: set from a request right away, or once a long training is approved.
             dcc.Store(id="forecasting-train-trigger"),
         ],
     )
@@ -138,7 +143,9 @@ def create_param_confirm_modal() -> html.Div:
                             html.Div(id="forecasting-confirm-inputs"),
                             # The specs of the recommended parameters, used to validate the confirmed values
                             dcc.Store(id="forecasting-confirm-specs"),
-                            html.Div(id="forecasting-param-confirm-error", style={"color": "red", "margin-top": "10px"}),
+                            html.Div(
+                                id="forecasting-param-confirm-error", style={"color": "red", "margin-top": "10px"}
+                            ),
                         ]
                     ),
                     dbc.ModalFooter(
@@ -152,6 +159,32 @@ def create_param_confirm_modal() -> html.Div:
                 is_open=False,
                 backdrop="static",
                 size="lg",
+            )
+        ]
+    )
+
+
+def create_long_train_modal() -> html.Div:
+    """
+    Popup asking whether to start a training whose estimated time exceeds `ForecastModel.train_confirm_seconds`.
+    Training only starts if the user approves.
+    """
+    return html.Div(
+        [
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle("Long Training")),
+                    dbc.ModalBody(html.Div(id="forecasting-long-train-content")),
+                    dbc.ModalFooter(
+                        [
+                            dbc.Button("Train anyway", id="forecasting-long-train-proceed-btn", n_clicks=0),
+                            dbc.Button("Cancel", id="forecasting-long-train-cancel-btn", n_clicks=0, color="secondary"),
+                        ]
+                    ),
+                ],
+                id="forecasting-long-train-modal",
+                is_open=False,
+                backdrop="static",
             )
         ]
     )

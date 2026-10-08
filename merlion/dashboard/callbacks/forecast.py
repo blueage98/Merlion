@@ -14,6 +14,7 @@ from dash import ALL, Input, Output, State, dcc, html, callback
 from merlion.dashboard.utils.file_manager import FileManager
 from merlion.dashboard.models.forecast import ForecastModel
 from merlion.dashboard.models.recommend import format_value, parse_confirmed_values
+from merlion.dashboard.models.train_time import format_duration
 from merlion.dashboard.pages.forecast import create_confirm_inputs
 from merlion.dashboard.pages.utils import create_param_table, create_metric_table, create_empty_figure
 
@@ -216,8 +217,9 @@ def handle_train_settings(
     :param specs: the specs of the recommended parameters shown in the popup.
     :param values: the values of the popup's input fields, in the same order as ``specs``.
     :param recommend: the function computing the `Recommendation` (default: `ForecastModel.recommend_params`).
-    :return: ``(popup is open, popup content, popup inputs, specs, error message, train trigger, param table)``,
-        with `dash.no_update` for the outputs that do not change.
+    :return: ``(popup is open, popup content, popup inputs, specs, error message, train request, param table)``,
+        with `dash.no_update` for the outputs that do not change. The train request goes through
+        `handle_train_request`, which starts training or first asks for approval if it would take long.
     """
     no_update = dash.no_update
     recommend = recommend or ForecastModel.recommend_params
@@ -256,7 +258,7 @@ def handle_train_settings(
     Output("forecasting-confirm-inputs", "children"),
     Output("forecasting-confirm-specs", "data"),
     Output("forecasting-param-confirm-error", "children"),
-    Output("forecasting-train-trigger", "data"),
+    Output("forecasting-train-request", "data"),
     Output("forecasting-param-table", "children", allow_duplicate=True),
     [
         Input("forecasting-train-btn", "n_clicks"),
@@ -311,6 +313,107 @@ def confirm_train_settings(
         specs=specs,
         values=values,
     )
+
+
+def _long_train_content(estimate):
+    """The content of the popup asking whether to start a long training (`TrainTimeEstimate`)."""
+    return [
+        html.P(
+            f"Training is estimated to take about {format_duration(estimate.seconds)}, which is longer than "
+            f"{format_duration(ForecastModel.train_confirm_seconds)}."
+        ),
+        html.P(f"Main cost: {estimate.basis}"),
+        html.P(
+            f"The estimate accounts for the speed of this machine ({estimate.speed_factor:.1f}x the time of the "
+            f"machine it was calibrated on) and can be off by a factor of 2 or so."
+        ),
+        html.P("Start training anyway? To train faster, cancel and change the settings (e.g. as suggested above)."),
+    ]
+
+
+def handle_train_request(prop_id, request, pending, estimate):
+    """
+    The logic of `gate_long_training`, separated from Dash so that it can be tested. A train request starts training
+    right away, unless its estimated training time exceeds `ForecastModel.train_confirm_seconds`: then a popup asks
+    for approval first, and training only starts if the user approves.
+
+    :param prop_id: the id of the component that triggered the callback.
+    :param request: the train request (``{"time": ..., "overrides": {...}}``).
+    :param pending: the request waiting for approval, if any.
+    :param estimate: a function of the request returning its `TrainTimeEstimate` (or ``None`` if unknown).
+    :return: ``(popup is open, popup content, pending request, train trigger)``, with `dash.no_update` for the
+        outputs that do not change.
+    """
+    no_update = dash.no_update
+    if prop_id == "forecasting-train-request" and request:
+        try:
+            est = estimate(request)
+        except Exception:
+            # The estimate is a safeguard: if it fails, train as before (any data error is reported by training)
+            logger.warning(f"Could not estimate the training time:\n{traceback.format_exc()}")
+            est = None
+        if est is not None and est.seconds > ForecastModel.train_confirm_seconds:
+            return True, _long_train_content(est), request, no_update
+        return False, no_update, None, request
+    if prop_id == "forecasting-long-train-proceed-btn" and pending:
+        return False, no_update, None, {**pending, "time": time.time()}
+    if prop_id in ("forecasting-long-train-proceed-btn", "forecasting-long-train-cancel-btn"):
+        return False, no_update, None, no_update
+    return no_update, no_update, no_update, no_update
+
+
+@callback(
+    Output("forecasting-long-train-modal", "is_open"),
+    Output("forecasting-long-train-content", "children"),
+    Output("forecasting-pending-train", "data"),
+    Output("forecasting-train-trigger", "data"),
+    [
+        Input("forecasting-train-request", "data"),
+        Input("forecasting-long-train-proceed-btn", "n_clicks"),
+        Input("forecasting-long-train-cancel-btn", "n_clicks"),
+    ],
+    [
+        State("forecasting-pending-train", "data"),
+        State("forecasting-select-file", "value"),
+        State("forecasting-select-target", "value"),
+        State("forecasting-select-features", "value"),
+        State("forecasting-select-exog", "value"),
+        State("forecasting-select-algorithm", "value"),
+        State("forecasting-param-table", "children"),
+        State("forecasting-training-slider", "value"),
+        State("forecasting-select-test-file", "value"),
+        State("forecasting-file-radio", "value"),
+    ],
+    prevent_initial_call=True,
+)
+def gate_long_training(
+    request,
+    proceed_clicks,
+    cancel_clicks,
+    pending,
+    filename,
+    target_col,
+    feature_cols,
+    exog_cols,
+    algorithm,
+    table,
+    train_percentage,
+    test_filename,
+    file_mode,
+):
+    """Starts training for a train request, after asking for approval if the training is estimated to take long."""
+
+    def estimate(req):
+        train_df = _load_train_test(filename, train_percentage, test_filename, file_mode)[0]
+        params = ForecastModel.parse_parameters(
+            param_info=ForecastModel.get_parameter_info(algorithm), params=_current_params(table)
+        )
+        params.update(req.get("overrides", {}))
+        return ForecastModel.estimate_train_time(
+            algorithm, train_df, target_col, feature_cols or [], exog_cols or [], params
+        )
+
+    return handle_train_request(dash.callback_context.triggered_id, request, pending, estimate)
 
 
 @callback(

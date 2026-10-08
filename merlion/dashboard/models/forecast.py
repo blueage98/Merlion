@@ -11,6 +11,7 @@ import pandas as pd
 
 from merlion.models.factory import ModelFactory
 from merlion.evaluate.forecast import ForecastEvaluator, ForecastMetric
+from merlion.transform.resample import TemporalResample
 from merlion.utils.time_series import TimeSeries
 from merlion.dashboard.models.recommend import (
     RECOMMENDERS,
@@ -19,6 +20,7 @@ from merlion.dashboard.models.recommend import (
     lgbm_params,
     steps_to_duration,
 )
+from merlion.dashboard.models.train_time import TrainTimeEstimate, estimate_train_seconds
 from merlion.dashboard.models.utils import ModelMixin, DataMixin
 from merlion.dashboard.utils.log import DashLogger
 
@@ -81,6 +83,9 @@ class ForecastModel(ModelMixin, DataMixin):
     prophet_min_acf = 0.1
     # Maximum VAR order searched for VectorAR's maxlags.
     var_max_lags = 20
+    # Estimated training time (in seconds) above which training only starts once the user approves it. The service
+    # runs on limited resources, so a long training is not started without asking.
+    train_confirm_seconds = 300
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -110,6 +115,24 @@ class ForecastModel(ModelMixin, DataMixin):
         if not rec.params:
             raise ValueError(f"Could not recommend any setting for {algorithm}.")
         return rec
+
+    @staticmethod
+    def estimate_train_time(
+        algorithm, train_df, target_column, feature_columns, exog_columns, params
+    ) -> TrainTimeEstimate:
+        """
+        Estimates how long training ``algorithm`` with ``params`` on the training data takes on this machine. The
+        data is resampled the way the models do, and the variables are those the model is trained on. See
+        merlion/dashboard/models/train_time.py for the cost model.
+        """
+        if target_column not in train_df:
+            target_column = int(target_column)
+        columns = [target_column] + [c if c in train_df else int(c) for c in list(feature_columns) + list(exog_columns)]
+        ts = TimeSeries.from_pd(train_df.loc[:, columns])
+        resample = TemporalResample()
+        resample.train(ts)
+        n_points = len(resample(ts).to_pd())
+        return estimate_train_seconds(algorithm, params, n_points, n_variables=len(columns))
 
     @staticmethod
     def recommend_lgbm_params(train_df, target_column):
