@@ -74,9 +74,10 @@ class ForecastModel(ModelMixin, DataMixin):
     sarima_seasonal_strength = 0.64
     # STL trend strength from which ETS gets a (damped) trend.
     ets_trend_strength = 0.5
-    # ETS seasonal period above which the recommendation warns that training can take very long (the fit time grows
-    # about 6x each time the period doubles: ~3s for 48 steps, ~13s for 96 and ~84s for 192 on 2000 points).
-    ets_slow_period = 48
+    # Minimum ACF of a seasonal period for ETS to model it. On the manufacturing benchmark (NAB machine temperature,
+    # SKAB sensors), the significant periods were either weak (ACF < 0.1: modeling them did not improve the forecast
+    # on average, and periods of 216-493 steps took 3-40 min to train) or clear (ACF >= 0.4: MASE improved by ~0.18).
+    ets_min_acf = 0.3
     # Spearman correlation between the seasonal amplitude and the level from which the seasonality is multiplicative.
     multiplicative_min_corr = 0.5
     # Minimum ACF at one calendar cycle for Prophet's yearly/weekly/daily seasonality, besides being significant.

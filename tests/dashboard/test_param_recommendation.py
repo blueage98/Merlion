@@ -293,14 +293,51 @@ def test_ets_white_noise():
     assert params["seasonal_periods"] is None
 
 
-def test_ets_long_period_is_recommended_with_warning():
+@pytest.fixture
+def calibrated_machine(monkeypatch):
+    # Training time estimates as on the calibration machine, so that they do not depend on the machine running the tests
+    monkeypatch.setattr("merlion.dashboard.models.train_time.machine_speed_factor", lambda: 1.0)
+
+
+def test_ets_weak_period_is_not_modeled(calibrated_machine):
+    # a significant but weak daily cycle (ACF ~ 0.1), like those of the manufacturing sensor data
+    rng = np.random.default_rng(0)
+    t = np.arange(2000)
+    rec = ForecastModel.recommend_params("ETS", _df(0.45 * np.sin(2 * np.pi * t / 24) + rng.normal(size=2000)), "value")
+    params = {p.name: p for p in rec.params}
+    assert params["seasonal_periods"].value is None and params["seasonal"].value == "None"
+    assert "too weak" in params["seasonal_periods"].basis
+
+
+def test_ets_period_too_slow_to_train_is_left_out(calibrated_machine):
+    # the daily cycle of 5-minute data (288 steps) would take several minutes to train
     df = _df(_sine(period=288, n_periods=10, amplitude=5), freq="5min")
     rec = ForecastModel.recommend_params("ETS", df, "value")
     params = {p.name: p for p in rec.params}
-    assert params["seasonal_periods"].value > ForecastModel.ets_slow_period
-    assert "can take very long" in params["seasonal_periods"].basis
-    assert any("can take very long" in note for note in rec.notes)
-    # short periods have no warning
+    assert params["seasonal_periods"].value is None
+    assert "trained with in time" in params["seasonal_periods"].basis
+    # one note for the strongest period left out (the detected daily period may be off by a step or so)
+    assert len(rec.notes) == 1
+    assert "to train" in rec.notes[0] and "LGBMForecaster" in rec.notes[0]
+
+
+def test_ets_falls_back_to_a_period_that_trains_in_time(calibrated_machine, monkeypatch):
+    # a strong 96-step cycle that is too slow for a time limit of 3 s (~4 s), plus a 12-step cycle (~0.5 s)
+    monkeypatch.setattr(ForecastModel, "train_confirm_seconds", 3)
+    t = np.arange(2000)
+    x = (
+        5 * np.sin(2 * np.pi * t / 96)
+        + 2 * np.sin(2 * np.pi * t / 12)
+        + 0.3 * np.random.default_rng(0).normal(size=2000)
+    )
+    rec = ForecastModel.recommend_params("ETS", _df(x), "value")
+    params = {p.name: p for p in rec.params}
+    # the 12-step cycle (detected as 11 or 12 steps: the slow 96-step cycle shifts the ACF peak)
+    assert params["seasonal_periods"].value in (11, 12)
+    assert "Estimated training time" in params["seasonal_periods"].basis
+    assert "left out" in params["seasonal_periods"].basis
+    assert len(rec.notes) == 1 and "96 steps" in rec.notes[0]
+    # a clear short period trains in time, without notes
     rec = ForecastModel.recommend_params("ETS", _df(_multiplicative()), "value")
     assert rec.notes == []
 

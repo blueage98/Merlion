@@ -127,7 +127,9 @@ Sarima의 `seasonal_order (P, D, Q, m)` 추천은 SHALL m을 유의한 지배적
 - **THEN** 추천 `seasonal_order`는 `(0, 0, 0, 0)`이고, 근거에 주기가 너무 길어 계절 항을 생략했다는 설명이 있다
 
 ### Requirement: ETS 구성 요소는 분해 강도와 진폭–수준 관계로 추천한다
-ETS 추천은 SHALL `seasonal_periods`를 유의한 지배적 계절 주기로 정하고(없으면 `None`, 이때 `seasonal`도 `None`), 계절 성분의 진폭이 수준에 비례해 커지고 데이터가 모두 양수이면 `seasonal`을 `mul`, 아니면 `add`로 정한다. `trend`는 SHALL 추세 강도가 기준을 넘으면 `add`, 아니면 `None`으로 정하고, 추세가 있으면 `damped_trend`를 `True`로 정한다. `error`는 SHALL `add`로 추천한다. 추천 주기가 학습 시간 경고 기준보다 길면 SHALL 그 주기를 그대로 추천하되 경고를 함께 보여 준다.
+ETS 추천은 SHALL `seasonal_periods`를 다음 후보 중에서 정한다: 유의한 계절 주기 가운데 ACF가 기준(`ets_min_acf`, 기본 0.3) 이상이고 데이터가 두 주기 이상을 덮는 주기. 후보를 ACF가 높은 순으로 보며, 예상 학습 시간이 승인 기준(`train_confirm_seconds`, 기본 5분) 이내인 첫 주기를 추천한다. 후보가 없으면 SHALL `None`(이때 `seasonal`도 `None`)을 추천하고, 근거에 그 이유(주기가 너무 약함, 또는 학습 시간이 기준을 넘음)를 적는다. 학습 시간 때문에 뺀 주기가 있으면 SHALL 팝업 노트에 가장 강한 그 주기와 예상 학습 시간, 대안(더 큰 간격으로 리샘플링, LGBMForecaster)을 표시한다. 계절 성분의 진폭이 수준에 비례해 커지고 데이터가 모두 양수이면 `seasonal`을 `mul`, 아니면 `add`로 정한다. `trend`는 SHALL 추세 강도가 기준을 넘으면 `add`, 아니면 `None`으로 정하고, 추세가 있으면 `damped_trend`를 `True`로 정한다. `error`는 SHALL `add`로 추천한다.
+
+배경(2026-10-09 제조 데이터 벤치마크, NAB machine temperature 21개 창과 SKAB 64개 창): 유의하지만 ACF가 0.1 미만인 주기는 예측을 평균적으로 개선하지 못했고, 그중 216~493단계 주기는 학습에 3~40분이 걸렸다. ACF 0.4 이상인 주기는 MASE를 개선했다(중앙값 약 0.18). 이 규칙으로 바꾼 뒤 machine temperature는 정확도가 같고 총 학습 시간이 40분에서 1초 미만으로, SKAB는 MASE 중앙값이 1.160에서 1.088로 줄고 총 학습 시간이 38분에서 0.5분으로 줄었다.
 
 #### Scenario: 추세와 곱셈 계절성
 - **WHEN** 선형 추세가 있고, 주기 12의 계절 진폭이 수준에 비례하는 양수 데이터로 ETS 추천을 계산한다
@@ -137,9 +139,17 @@ ETS 추천은 SHALL `seasonal_periods`를 유의한 지배적 계절 주기로 �
 - **WHEN** 백색 잡음 데이터로 ETS 추천을 계산한다
 - **THEN** 추천은 `trend=None`, `seasonal=None`, `seasonal_periods=None`이다
 
+#### Scenario: 약한 계절 주기
+- **WHEN** NAB machine temperature 학습 데이터(5분 간격, 18,156점)처럼 가장 강한 유의 주기(1969단계)의 ACF가 0.158로 기준보다 약하다
+- **THEN** `seasonal_periods`는 `None`으로 추천되고, 근거에 그 주기가 너무 약하다는 설명이 있다
+
 #### Scenario: 학습이 오래 걸리는 긴 계절 주기
-- **WHEN** 5분 간격 데이터에서 지배적 주기가 288(1일)로 검출되어, 학습 시간 경고 기준(기본 48단계)보다 길다
-- **THEN** `seasonal_periods`는 그 주기로 추천되고, 그 근거와 팝업 노트에 ETS 학습이 매우 오래 걸릴 수 있으며 더 큰 간격으로 리샘플링하거나 주기를 줄이거나 `seasonal`을 `None`으로 바꾸라는 경고가 표시된다
+- **WHEN** 5분 간격 데이터에서 뚜렷한 주기가 288(1일)뿐이고, 그 주기로 학습하면 5분을 넘을 것으로 예상된다
+- **THEN** `seasonal_periods`는 `None`으로 추천되고, 팝업 노트에 그 주기의 예상 학습 시간과 리샘플링하거나 LGBMForecaster를 쓰라는 안내가 표시된다
+
+#### Scenario: 학습 시간 안에 드는 짧은 주기로 대체
+- **WHEN** 가장 강한 주기는 학습 시간이 기준을 넘고, 그보다 약하지만 기준 이상의 ACF를 가진 짧은 주기가 있다
+- **THEN** `seasonal_periods`는 그 짧은 주기로 추천되고, 근거에 예상 학습 시간과 더 강한 주기를 뺐다는 설명이 있다
 
 ### Requirement: Prophet 계절성은 달력 주기의 관측 가능성과 유의성으로 추천한다
 Prophet 추천은 SHALL 연·주·일 계절성 각각을 다음 조건을 모두 만족할 때만 `True`, 아니면 `False`로 정한다: 학습 데이터가 그 주기의 2배 이상 길다, 샘플링 간격이 그 주기의 절반보다 짧다, 그 주기 근처에서 자기상관이 유의하다. `seasonality_mode`는 SHALL ETS와 같은 진폭–수준 기준으로 `multiplicative` 또는 `additive`로 정한다.

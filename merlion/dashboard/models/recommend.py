@@ -19,6 +19,7 @@ Each recommender takes a :class:`SeriesStats` (statistics shared across algorith
 the settings class (``ForecastModel``, whose class variables hold the thresholds and time limits), and returns a
 :class:`Recommendation`. Recommenders are registered in ``RECOMMENDERS``.
 """
+
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import warnings
@@ -34,6 +35,7 @@ from statsmodels.tsa.stattools import adfuller, kpss
 from merlion.models.automl.seasonality import SeasonalityLayer, PeriodicityStrategy
 from merlion.transform.resample import TemporalResample
 from merlion.utils.time_series import TimeSeries
+from merlion.dashboard.models.train_time import estimate_train_seconds, format_duration
 
 
 @dataclass
@@ -702,9 +704,7 @@ def recommend_sarima(algorithm, stats: SeriesStats, cfg, feature_columns=None) -
     if order is not None:
         params.append(ParamRecommendation("order", list(order[0]), "int_tuple", order[1], tuple_len=3))
     if seasonal_order is not None:
-        params.append(
-            ParamRecommendation("seasonal_order", seasonal_order, "int_tuple", seasonal_basis, tuple_len=4)
-        )
+        params.append(ParamRecommendation("seasonal_order", seasonal_order, "int_tuple", seasonal_basis, tuple_len=4))
     params.append(recommend_arima_horizon(stats, cfg, y, d, D=D, m=m))
     notes = [f"The order search used the latest {len(y)} points."]
     if m is not None and m > cfg.sarima_max_period:
@@ -712,44 +712,84 @@ def recommend_sarima(algorithm, stats: SeriesStats, cfg, feature_columns=None) -
     return Recommendation(algorithm, params, stats.n_points, stats.granularity, ic_points=len(y), notes=notes)
 
 
+def _ets_period(stats: SeriesStats, cfg):
+    """
+    The seasonal period for ETS, how it was chosen, and notes on the periods left out. The candidates are the
+    significant periods whose ACF is at least ``ets_min_acf`` (weaker cycles do not improve the forecast, while they
+    can make training very slow) and that the data covers at least twice. They are tried from the highest ACF down,
+    and the first one whose estimated training time is within ``train_confirm_seconds`` is chosen, since ETS training
+    time grows steeply with the period (it estimates one initial state per step of the period).
+
+    :return: ``(period or None, basis, notes)``
+    """
+    acf = stats.acf
+    candidates = [
+        p
+        for p in stats.periods
+        if 1 < p <= stats.max_lag and acf[p] >= cfg.ets_min_acf and acf[p] > acf[p // 2] and stats.n_points >= 2 * p
+    ]
+    candidates.sort(key=lambda p: acf[p], reverse=True)
+
+    def slow_note(skipped):
+        # The strongest period left out, and the others (often near multiples of it) in short
+        (p, seconds), others = skipped[0], [s[0] for s in skipped[1:]]
+        note = (
+            f"The seasonal period of {p} steps ({steps_to_duration(p, stats.granularity)}, ACF = {acf[p]:.2f}) is "
+            f"not recommended: ETS would take about {format_duration(seconds)} to train with it (more than "
+            f"{format_duration(cfg.train_confirm_seconds)}). To model it, resample the data at a coarser granularity "
+            f"or use LGBMForecaster (maxlags >= {p})."
+        )
+        if others:
+            note += f" Other periods left out for the same reason: {', '.join(map(str, others))} steps."
+        return [note]
+
+    skipped = []
+    for p in candidates:
+        est = estimate_train_seconds("ETS", {"seasonal": "add", "seasonal_periods": p}, stats.n_points)
+        if est.seconds <= cfg.train_confirm_seconds:
+            basis = (
+                f"Seasonal period with the highest ACF among those >= {cfg.ets_min_acf} "
+                f"({steps_to_duration(p, stats.granularity)}, ACF = {acf[p]:.3f}); STL seasonal strength = "
+                f"{stats.seasonal_strength(p):.2f}. Estimated training time: {format_duration(est.seconds)}."
+            )
+            if skipped:
+                basis += " Stronger periods were left out because they would train too long (see the notes)."
+            return p, basis, slow_note(skipped) if skipped else []
+        skipped.append((p, est.seconds))
+
+    if skipped:
+        return None, "No seasonal period that ETS can be trained with in time (see the notes).", slow_note(skipped)
+    dominant = stats.dominant_period()
+    if dominant is not None and acf[dominant] < cfg.ets_min_acf:
+        basis = (
+            f"No seasonal period strong enough to model: the dominant significant period "
+            f"({steps_to_duration(dominant, stats.granularity)}) has ACF = {acf[dominant]:.3f} < {cfg.ets_min_acf}, "
+            f"too weak for a seasonal component to improve the forecast."
+        )
+    else:
+        basis = "No significant seasonal period."
+    return None, basis, []
+
+
 def recommend_ets(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> Recommendation:
     """
-    ETS: each component is matched to one property of the data. The seasonal period is the dominant significant
-    period; the seasonality is multiplicative if its amplitude grows with the level; there is a (damped) trend if
-    the STL trend strength is at least ``ets_trend_strength``. A seasonal period longer than ``ets_slow_period`` is
-    still recommended, but with a warning, since ETS training time grows steeply with the period.
+    ETS: each component is matched to one property of the data. The seasonal period is the strongest significant
+    period with an ACF of at least ``ets_min_acf`` that ETS can be trained with in ``train_confirm_seconds`` (see
+    `_ets_period`); the seasonality is multiplicative if its amplitude grows with the level; there is a (damped)
+    trend if the STL trend strength is at least ``ets_trend_strength``.
     """
-    m = stats.dominant_period()
-    if m is not None and stats.n_points < 2 * m:
-        m = None
+    m, periods_basis, notes = _ets_period(stats, cfg)
     if m is None:
-        seasonal, seasonal_basis = "None", "No significant seasonal period."
-        periods_basis = "No significant seasonal period."
+        seasonal, seasonal_basis = "None", "No seasonal period (see seasonal_periods)."
     else:
         mul, why = stats.is_multiplicative(m, cfg.multiplicative_min_corr)
         seasonal = "mul" if mul else "add"
         seasonal_basis = f"{'Multiplicative' if mul else 'Additive'}: {why}."
-        periods_basis = (
-            f"Dominant seasonal period ({steps_to_duration(m, stats.granularity)}, ACF = {stats.acf[m]:.3f}); "
-            f"STL seasonal strength = {stats.seasonal_strength(m):.2f}."
-        )
-
-    notes = []
-    if m is not None and m > cfg.ets_slow_period:
-        warning = (
-            f"Warning: ETS estimates one initial seasonal state per step of the period, so training it with a "
-            f"seasonal period of {m} steps can take very long (on 2000 points: ~13s for 96 steps, ~84s for 192, "
-            f"growing about 6x each time the period doubles). Consider resampling the data at a coarser granularity, "
-            f"lowering seasonal_periods, or setting seasonal to None."
-        )
-        periods_basis += " " + warning
-        notes.append(warning)
 
     strength = stats.trend_strength(m)
     has_trend = strength >= cfg.ets_trend_strength
-    trend_basis = (
-        f"Trend strength = {strength:.2f} ({'>=' if has_trend else '<'} {cfg.ets_trend_strength})"
-        + (f", from an STL decomposition with period {m}." if m is not None else ", from a moving-average trend.")
+    trend_basis = f"Trend strength = {strength:.2f} ({'>=' if has_trend else '<'} {cfg.ets_trend_strength})" + (
+        f", from an STL decomposition with period {m}." if m is not None else ", from a moving-average trend."
     )
     damped_basis = (
         "A damped trend levels off over long horizons, which is usually more accurate than extrapolating it."
