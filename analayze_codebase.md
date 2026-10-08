@@ -71,6 +71,8 @@ print(Foo.__members__)  # Python 3.14: {} / Python 3.12: {'A': <Foo.A>}
 ```
 `merlion/utils/resample.py::AggregationPolicy`가 이 패턴을 사용하므로 Python 3.14에서만 `TimeSeries.align()`이 깨짐 — **merlion 코드 버그가 아니라 Python 3.14 자체의 Enum 구현 변경**.
 
+> **정정 (2026-10-07, 1-4 참고)**: "3.14 전용"은 틀렸음. Python **3.13.14**에서도 똑같이 재현됨(`functools.partial`이 메서드 디스크립터로 취급되어 Enum 멤버가 되지 않음). 이제 merlion 코드에서 `enum.member()`로 감싸 해결함.
+
 ### 새로 발견되고 수정된 실제 버그: pandas `[-1]` 위치 인덱싱 (KeyError: -1)
 
 Enum 버그가 3.12에서 사라지자, 그 아래 가려져 있던 **별개의 실제 merlion 버그**가 드러남: `ForecastModel.train()`(Arima)이 `pandas.KeyError: -1`로 실패.
@@ -91,13 +93,26 @@ Enum 버그가 3.12에서 사라지자, 그 아래 가려져 있던 **별개의 
 
 | 제약 | `setup.py` 선언 | 실제 필요 | 근거 |
 |---|---|---|---|
-| Python | `>=3.7.0` (상한 없음) | **`<3.14`** (정확한 하한 미확인 — 3.12는 안전 확인, 3.13은 미검증) | Enum+`functools.partial` 버그 |
+| Python | `>=3.7.0` (상한 없음) | 상한 없음 — Enum 값을 `enum.member()`로 감싸 해결(1-4). 3.12, 3.13.14에서 검증 | Enum+`functools.partial` 버그 (3.13.14와 3.14에서 재현) |
 | numpy | `>=1.21,<2.0` | 선언대로 유지 가능 (3.14에서만 컴파일러 문제) | Python 3.12에서 정상 빌드 확인 |
 | dash | `>=2.4` (상한 없음) | **`>=2.4,<3.0`** | `dash.long_callback` 모듈 제거 (dash 3.0~) |
 | psutil | 미선언 | `dash[diskcache]` 사용 시 명시적으로 필요 | `DiskcacheLongCallbackManager` 런타임 요구사항 |
 | pandas | `>=1.1.0` (상한 없음) | 상한 검토 필요 — 최소 `sarima.py`/`ets.py`의 `.iloc[-1]` 수정으로 pandas 3.0.3에서 해결됨(이번 세션에서 수정 완료) | `series[-1]` 위치 인덱싱 폴백 제거 |
 
-**권장 조합**: `Python 3.12 + numpy<2.0 + dash>=2.4,<3.0` — 이번 세션에서 실제로 end-to-end 검증 완료.
+**권장 조합**: `Python 3.12 + numpy<2.0 + dash>=2.4,<3.0` — 이번 세션에서 실제로 end-to-end 검증 완료. 1-4의 수정 후에는 `Python 3.13.14 + numpy 1.26.4 + pandas 2.3.3 + dash 2.18.0`도 검증됨.
+
+## 1-4. Python 3.13 재검증 및 Enum 코드 수정 (2026-10-07)
+
+**발견**: 이 PC의 유일한 인터프리터(Microsoft Store판 Python 3.13.14)에서 `scripts/check_environment.py`의 Enum 점검이 FAIL. 1-3의 "3.14 전용" 판단과 달리 3.13.14에서도 `partial` 값이 Enum 멤버가 되지 않아(`AggregationPolicy.__members__ == {}`) 모든 모델 학습이 막혔음. 같은 코드에서 `enum.member(partial(...))`로 감싼 멤버는 정상적으로 남음.
+
+**Python 3.12로 내리는 방안 검토 결과**: `setup.py` 그대로 3.12에 새로 설치하면 pip가 pandas 3.0.6, statsmodels 0.15.0, scikit-learn 1.9.1, prophet 1.5.0을 고름(현재 3.13 환경은 pandas 2.3.3, statsmodels 0.14.6). 임시 venv로 확인한 결과 statsmodels 0.15는 추천 기능이 쓰는 API(ACF, KPSS, ADF, SARIMAX, AR/VAR 차수 선택, STL, ETSModel)가 모두 정상이었음. 반면 pandas 3은 `"H"`, `"M"`, `"Q"`, `"Y"` 주기 문자열을 거부해 M4 로더가 깨짐(아래 수정).
+
+**수정 내용**:
+- `merlion/utils/resample.py`, `merlion/evaluate/forecast.py`, `merlion/evaluate/anomaly.py`: `partial` 값을 가진 Enum 멤버 34개를 `enum_member(partial(...))`로 감쌈. `enum.member`가 없는 Python <3.11에서는 아무것도 하지 않는 함수로 대체됨.
+- `ts_datasets/ts_datasets/forecast/m4.py`: 주기 문자열을 설치된 pandas에 맞게 고름(pandas 2.2 이상은 `h`/`ME`/`QE`/`YE`, 그 이전은 `H`/`M`/`Q`/`Y`).
+- `scripts/check_environment.py`: 인터프리터 동작만 보던 Enum 점검을, merlion의 실제 Enum 멤버가 모두 있는지 확인하도록 바꿈(인터프리터 동작은 참고로 표시).
+
+**검증**: Python 3.13.14에서 `tests/dashboard`, `tests/evaluate`, `tests/transform`, `tests/forecast/test_smoother.py` 103개 통과. `check_environment.py`의 Enum 점검 PASS.
 
 ## 2. 폴더 구조와 계층 파악
 
@@ -207,4 +222,4 @@ dashboard/callbacks/anomaly.py, forecast.py
 
 Merlion 핵심 라이브러리는 웹 계층 없는 순수 Python 시계열 라이브러리이며, DB도 없다. `merlion/dashboard/`만이 routes/controllers/services/db에 대응하는 유사 구조(pages→callbacks→models→file_manager)를 가지고 있고, 모든 영속화는 로컬 파일시스템 기반이다. 이 대시보드는 단일 사용자/로컬 실행을 전제로 설계된 것으로 보이며, 다중 사용자 환경에 그대로 노출하면 파일 충돌·정보 노출·역직렬화 기반 RCE 위험이 실질적인 문제가 된다.
 
-**실행 환경 검증 이력**: Python 3.14에서 numpy 빌드 실패, dash 버전 문제, Enum 호환성 문제(3.14 전용, 실질적으로 모든 모델 학습을 막음)를 발견. Python 3.12로 재검증한 결과 numpy/Enum 문제는 해소되었으나, 그 아래 가려져 있던 별개의 실제 버그(pandas `[-1]` 위치 인덱싱, `sarima.py`/`ets.py`)를 새로 발견해 `.iloc[-1]`로 수정 완료. 최종적으로 `Python 3.12 + numpy<2.0 + dash>=2.4,<3.0` 조합에서 이상탐지·예측 모델의 학습→저장→로드 전체 흐름을 `tests/dashboard/`(10개 테스트)로 end-to-end 검증함.
+**실행 환경 검증 이력**: Python 3.14에서 numpy 빌드 실패, dash 버전 문제, Enum 호환성 문제(3.14 전용, 실질적으로 모든 모델 학습을 막음)를 발견. Python 3.12로 재검증한 결과 numpy/Enum 문제는 해소되었으나, 그 아래 가려져 있던 별개의 실제 버그(pandas `[-1]` 위치 인덱싱, `sarima.py`/`ets.py`)를 새로 발견해 `.iloc[-1]`로 수정 완료. 최종적으로 `Python 3.12 + numpy<2.0 + dash>=2.4,<3.0` 조합에서 이상탐지·예측 모델의 학습→저장→로드 전체 흐름을 `tests/dashboard/`(10개 테스트)로 end-to-end 검증함. 이후 Enum 버그가 Python 3.13.14에서도 재현됨을 확인하고, 인터프리터를 바꾸는 대신 Enum 값을 `enum.member()`로 감싸는 코드 수정으로 해결함(1-4).

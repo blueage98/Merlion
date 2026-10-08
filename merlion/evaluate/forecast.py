@@ -7,8 +7,16 @@
 """
 Metrics and utilities for evaluating forecasting models in a continuous sense.
 """
+
 from enum import Enum
 from functools import partial
+
+try:
+    # Python 3.13+ treats functools.partial as a method descriptor, so an Enum ignores partial values unless they
+    # are wrapped in enum.member() (available from Python 3.11).
+    from enum import member as enum_member
+except ImportError:
+    enum_member = lambda x: x
 from typing import List, Union, Tuple
 import warnings
 
@@ -246,14 +254,14 @@ class ForecastMetric(Enum):
     `ForecastEvaluator`.
     """
 
-    MAE = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.mae)
+    MAE = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.mae))
     """
     Mean Absolute Error (MAE) is formulated as:
 
     ..  math:: 
         \\frac{1}{T}\\sum_{t=1}^T{(|y_t - \\hat{y}_t|)}.
     """
-    MARRE = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.marre)
+    MARRE = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.marre))
     """
     Mean Absolute Ranged Relative Error (MARRE) is formulated as:
 
@@ -261,14 +269,14 @@ class ForecastMetric(Enum):
         100 \\cdot \\frac{1}{T} \\sum_{t=1}^{T} {\\left| \\frac{y_t
         - \\hat{y}_t} {\\max_t{y_t} - \\min_t{y_t}} \\right|}.
     """
-    RMSE = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.rmse)
+    RMSE = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.rmse))
     """
     Root Mean Squared Error (RMSE) is formulated as:
     
     .. math::
         \\sqrt{\\frac{1}{T}\\sum_{t=1}^T{(y_t - \\hat{y}_t)^2}}.
     """
-    sMAPE = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.smape)
+    sMAPE = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.smape))
     """
     symmetric Mean Absolute Percentage Error (sMAPE) is formulated as:
 
@@ -276,13 +284,13 @@ class ForecastMetric(Enum):
         200 \\cdot \\frac{1}{T}\\sum_{t=1}^{T}{\\frac{\\left| y_t
         - \\hat{y}_t \\right|}{\\left| y_t \\right| + \\left| \\hat{y}_t \\right|}}.
     """
-    RMSPE = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.rmspe)
+    RMSPE = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.rmspe))
     """
     Root Mean Square Percent Error is formulated as:
     
     .. math:: 100 \\cdot \\sqrt{\\frac{1}{T}\\sum_{t=1}^T\\frac{(y_t - \\hat{y}_t)}{y_t}^2}.
     """
-    MASE = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.mase)
+    MASE = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.mase))
     """
     Mean Absolute Scaled Error (MASE) is formulated as:
 
@@ -290,7 +298,7 @@ class ForecastMetric(Enum):
         \\frac{1}{T}\\cdot\\frac{\\sum_{t=1}^{T}\\left| y_t
           - \\hat{y}_t \\right|}{\\frac{1}{N-m}\\sum_{t=m+1}^{N}\\left| x_t - x_{t-m} \\right|}.
     """
-    MSIS = partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.msis)
+    MSIS = enum_member(partial(accumulate_forecast_score, metric=ForecastScoreAccumulator.msis))
     """
     Mean Scaled Interval Score (MSIS) is formulated as:
 

@@ -7,8 +7,16 @@
 """
 Code for resampling time series.
 """
+
 from enum import Enum
 from functools import partial
+
+try:
+    # Python 3.13+ treats functools.partial as a method descriptor, so an Enum ignores partial values unless they
+    # are wrapped in enum.member() (available from Python 3.11).
+    from enum import member as enum_member
+except ImportError:
+    enum_member = lambda x: x
 import logging
 import math
 import re
@@ -49,13 +57,13 @@ class AggregationPolicy(Enum):
     pandas.core.resample.Resampler methods.
     """
 
-    Mean = partial(lambda df, *args, **kwargs: getattr(df, "mean")(*args, **kwargs))
-    Sum = partial(lambda df, *args, **kwargs: getattr(df, "sum")(*args, **kwargs))
-    Median = partial(lambda df, *args, **kwargs: getattr(df, "median")(*args, **kwargs))
-    First = partial(lambda df, *args, **kwargs: getattr(df, "first")(*args, **kwargs))
-    Last = partial(lambda df, *args, **kwargs: getattr(df, "last")(*args, **kwargs))
-    Min = partial(lambda df, *args, **kwargs: getattr(df, "min")(*args, **kwargs))
-    Max = partial(lambda df, *args, **kwargs: getattr(df, "max")(*args, **kwargs))
+    Mean = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "mean")(*args, **kwargs)))
+    Sum = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "sum")(*args, **kwargs)))
+    Median = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "median")(*args, **kwargs)))
+    First = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "first")(*args, **kwargs)))
+    Last = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "last")(*args, **kwargs)))
+    Min = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "min")(*args, **kwargs)))
+    Max = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "max")(*args, **kwargs)))
 
 
 class MissingValuePolicy(Enum):
@@ -63,15 +71,21 @@ class MissingValuePolicy(Enum):
     Missing value imputation policies. Values are partial functions for ``pd.Series`` methods.
     """
 
-    FFill = partial(lambda df, *args, **kwargs: getattr(df, "ffill")(*args, **kwargs))
+    FFill = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "ffill")(*args, **kwargs)))
     """Fill gap with the first value before the gap."""
-    BFill = partial(lambda df, *args, **kwargs: getattr(df, "bfill")(*args, **kwargs))
+    BFill = enum_member(partial(lambda df, *args, **kwargs: getattr(df, "bfill")(*args, **kwargs)))
     """Fill gap with the first value after the gap."""
-    Nearest = partial(lambda df, *args, **kwargs: getattr(df, "interpolate")(*args, **kwargs), method="nearest")
+    Nearest = enum_member(
+        partial(lambda df, *args, **kwargs: getattr(df, "interpolate")(*args, **kwargs), method="nearest")
+    )
     """Replace missing value with the value closest to it."""
-    Interpolate = partial(lambda df, *args, **kwargs: getattr(df, "interpolate")(*args, **kwargs), method="time")
+    Interpolate = enum_member(
+        partial(lambda df, *args, **kwargs: getattr(df, "interpolate")(*args, **kwargs), method="time")
+    )
     """Fill in missing values by linear interpolation."""
-    ZFill = partial(lambda df, *args, **kwargs: getattr(df, "replace")(*args, **kwargs), to_replace=np.nan, value=0)
+    ZFill = enum_member(
+        partial(lambda df, *args, **kwargs: getattr(df, "replace")(*args, **kwargs), to_replace=np.nan, value=0)
+    )
     """Replace missing values with zeros."""
 
 

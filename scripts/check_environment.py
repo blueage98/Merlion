@@ -38,45 +38,56 @@ class Result:
 
 
 def check_python_version():
-    """merlion/utils/resample.py::AggregationPolicy uses Enum members whose values
-    are functools.partial objects. Python 3.14 no longer recognizes these as members
-    (see analayze_codebase.md section 1-3), which breaks TimeSeries.align() and thus
-    all real model training. Verified broken on 3.14, verified fine on 3.12; 3.13 is
-    untested, so it's flagged as a warning rather than asserted safe."""
+    """merlion's AggregationPolicy/MissingValuePolicy (merlion/utils/resample.py), ForecastMetric
+    (merlion/evaluate/forecast.py) and TSADMetric (merlion/evaluate/anomaly.py) are Enums whose
+    values are functools.partial objects. Python 3.13+ (verified on 3.13.14 and 3.14) treats
+    functools.partial as a method descriptor, so a bare partial value is not an Enum member, which
+    breaks TimeSeries.align() and thus all real model training (analayze_codebase.md section 1-3).
+    merlion now wraps these values in enum.member(). This check verifies merlion's own Enums, and
+    reports the bare interpreter behavior for reference."""
     from enum import Enum
     from functools import partial
 
     class _Probe(Enum):
         A = partial(lambda x: x)
 
-    if not _Probe.__members__:
+    version = sys.version.split()[0]
+    interpreter = (
+        "bare functools.partial Enum values are NOT members on this interpreter, so merlion relies on its "
+        "enum.member() wrapping"
+        if not _Probe.__members__
+        else "bare functools.partial Enum values are members on this interpreter"
+    )
+    expected = {
+        "merlion.utils.resample.AggregationPolicy": {"Mean", "Sum", "Median", "First", "Last", "Min", "Max"},
+        "merlion.utils.resample.MissingValuePolicy": {"FFill", "BFill", "Nearest", "Interpolate", "ZFill"},
+        "merlion.evaluate.forecast.ForecastMetric": {"MAE", "MARRE", "RMSE", "sMAPE", "RMSPE", "MASE", "MSIS"},
+        "merlion.evaluate.anomaly.TSADMetric": {"F1", "Precision", "Recall", "MeanTimeToDetect", "NABScore"},
+    }
+    missing = []
+    try:
+        for path, names in expected.items():
+            module, cls = path.rsplit(".", 1)
+            members = set(getattr(importlib.import_module(module), cls).__members__)
+            if not names <= members:
+                missing.append(f"{path}: missing {sorted(names - members)}")
+    except Exception as e:
         return Result(
             "Python Enum/functools.partial behavior",
             FAIL,
-            f"Python {sys.version.split()[0]}: Enum members with functools.partial values are not "
-            "recognized (reproduces the bug that breaks merlion.utils.resample.AggregationPolicy, "
-            "which breaks TimeSeries.align() and all real model.train() calls). "
-            "Known-good: Python 3.12. Known-bad: Python 3.14.",
+            f"Python {version}: could not import merlion's Enums ({type(e).__name__}: {e}); {interpreter}.",
         )
-    if sys.version_info >= (3, 14):
-        # Shouldn't happen given the check above, but keep as a belt-and-suspenders warning.
+    if missing:
         return Result(
             "Python Enum/functools.partial behavior",
-            WARN,
-            f"Python {sys.version.split()[0]}: functional probe passed, but this Python version "
-            "wasn't the one verified in analayze_codebase.md -- re-verify if issues appear.",
-        )
-    if sys.version_info[:2] == (3, 13):
-        return Result(
-            "Python Enum/functools.partial behavior",
-            WARN,
-            f"Python {sys.version.split()[0]}: functional probe passed. Python 3.13 itself was never "
-            "directly tested in analayze_codebase.md (only 3.12 and 3.14) -- treat as provisionally OK.",
+            FAIL,
+            f"Python {version}: {interpreter}, and merlion's Enums are missing members (wrap their partial "
+            "values in enum.member()):\n    " + "\n    ".join(missing),
         )
     return Result(
         "Python Enum/functools.partial behavior",
         PASS,
-        f"Python {sys.version.split()[0]}: Enum members with functools.partial values work correctly.",
+        f"Python {version}: merlion's partial-valued Enums have all their members ({interpreter}).",
     )
 
 

@@ -32,7 +32,7 @@ Purpose: run `scripts/check_environment.py` against the active Python interprete
 3. **Report results to the user** in a short table or list: which checks PASSed, WARNed, or FAILed, with the one-line detail the script prints for each. Don't just say "some checks failed" — name them.
 
 4. **For each FAIL, give the concrete fix**, not just "something's wrong":
-   - Python Enum/functools.partial FAIL → the interpreter itself is the problem (e.g. Python 3.14). Recommend switching to Python 3.12 (verified working) — e.g. via a venv (`py -3.12 -m venv .venv312` on Windows, or `python3.12 -m venv .venv312` elsewhere), not by editing merlion source.
+   - Python Enum/functools.partial FAIL → one of merlion's partial-valued Enums (`AggregationPolicy`, `MissingValuePolicy`, `ForecastMetric`, `TSADMetric`) is missing members. On Python 3.13+ (verified 3.13.14 and 3.14) a bare `functools.partial` value is not an Enum member, so merlion wraps these values in `enum_member(...)` (`enum.member`). The FAIL means a member was added or changed without that wrapper, or an old non-editable merlion is installed (`pip install --no-deps -e .`). The script names the missing members. See analayze_codebase.md section 1-4.
    - numpy WARN → `pip install "numpy>=1.21,<2.0"` (or investigate why a newer numpy got pulled in, e.g. no compatible wheel for the current Python version).
    - pandas `[-1]` regression FAIL → someone reintroduced a bare `series[-1]` in `sarima.py`/`ets.py` (the script's error message names the exact file:line) — change it back to `.iloc[-1]`.
    - dash FAIL → `pip install "dash[diskcache]>=2.4,<3.0"` (e.g. `dash==2.18.2`, the version verified in analayze_codebase.md).

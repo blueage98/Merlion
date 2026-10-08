@@ -9,39 +9,15 @@ Tests for merlion/dashboard/models/anomaly.py::AnomalyModel, focused on the
 three interface points it uses to talk to merlion core: ModelFactory,
 TimeSeries, and ModelBase/Config (see analayze_codebase.md section 5-1).
 """
-import sys
 
 import pytest
 
 from merlion.models.base import ModelBase
 from merlion.dashboard.models.anomaly import AnomalyModel
 
-# On Python 3.14, `Enum` members whose values are `functools.partial` objects are
-# no longer recognized as members (`AggregationPolicy.__members__` comes back empty --
-# reproduced independently of the dashboard: a bare `class Foo(Enum): A = partial(...)`
-# already has `Foo.__members__ == {}` on this interpreter). merlion's
-# `merlion/utils/resample.py::AggregationPolicy` hits this, which breaks
-# `TemporalResample`/`TimeSeries.align()` and therefore every real `model.train()`
-# call. This is a merlion-core/Python-version incompatibility, not a bug in these
-# tests or in the dashboard<->core interface being tested here.
-#
-# Re-verified on Python 3.12 (2026-07-16): the bug does NOT reproduce there --
-# `Foo.__members__` comes back with all members, and these two tests pass for real
-# (previously they were unconditionally marked xfail while this was only tested on
-# 3.14; that made them XPASS -- a false "still broken" signal -- once run on 3.12).
-PY314_ENUM_PARTIAL_BUG = sys.version_info >= (3, 14)
-PY314_ENUM_PARTIAL_BUG_REASON = (
-    "Python 3.14 Enum does not treat functools.partial values as members "
-    "(AggregationPolicy.__members__ is empty), breaking TimeSeries.align() "
-    "and thus all real model.train() calls -- a merlion-core/Python 3.14 "
-    "incompatibility, not a dashboard interface bug. Confirmed fixed on Python 3.12."
-)
-
-
 # --- Happy path -------------------------------------------------------------
 
 
-@pytest.mark.xfail(condition=PY314_ENUM_PARTIAL_BUG, reason=PY314_ENUM_PARTIAL_BUG_REASON, strict=True)
 def test_train_returns_model_and_metrics(train_test_df, set_progress):
     train_df, test_df = train_test_df
     anomaly_model = AnomalyModel()
@@ -66,7 +42,6 @@ def test_train_returns_model_and_metrics(train_test_df, set_progress):
     assert set_progress.calls  # progress callback was actually invoked
 
 
-@pytest.mark.xfail(condition=PY314_ENUM_PARTIAL_BUG, reason=PY314_ENUM_PARTIAL_BUG_REASON, strict=True)
 def test_save_and_load_model_round_trip(train_test_df, set_progress, file_manager):
     train_df, test_df = train_test_df
     anomaly_model = AnomalyModel()

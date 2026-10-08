@@ -7,9 +7,17 @@
 """
 Metrics and utilities for evaluating time series anomaly detection models.
 """
+
 from bisect import bisect_left
 from enum import Enum
 from functools import partial
+
+try:
+    # Python 3.13+ treats functools.partial as a method descriptor, so an Enum ignores partial values unless they
+    # are wrapped in enum.member() (available from Python 3.11).
+    from enum import member as enum_member
+except ImportError:
+    enum_member = lambda x: x
 from typing import Tuple, Union
 
 import numpy as np
@@ -303,54 +311,72 @@ class TSADMetric(Enum):
     function of form ``f(ground_truth, predicted, **kwargs)``
     """
 
-    MeanTimeToDetect = partial(accumulate_tsad_score, metric=TSADScoreAccumulator.mean_time_to_detect)
+    MeanTimeToDetect = enum_member(partial(accumulate_tsad_score, metric=TSADScoreAccumulator.mean_time_to_detect))
 
     # Revised point-adjusted metrics (default)
-    F1 = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.f1, score_type=ScoreType.RevisedPointAdjusted)
+    F1 = enum_member(
+        partial(
+            accumulate_tsad_score, metric=partial(TSADScoreAccumulator.f1, score_type=ScoreType.RevisedPointAdjusted)
+        )
     )
-    Precision = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.precision, score_type=ScoreType.RevisedPointAdjusted)
+    Precision = enum_member(
+        partial(
+            accumulate_tsad_score,
+            metric=partial(TSADScoreAccumulator.precision, score_type=ScoreType.RevisedPointAdjusted),
+        )
     )
-    Recall = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.recall, score_type=ScoreType.RevisedPointAdjusted)
+    Recall = enum_member(
+        partial(
+            accumulate_tsad_score,
+            metric=partial(TSADScoreAccumulator.recall, score_type=ScoreType.RevisedPointAdjusted),
+        )
     )
 
     # Pointwise metrics
-    PointwiseF1 = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.f1, score_type=ScoreType.Pointwise)
+    PointwiseF1 = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.f1, score_type=ScoreType.Pointwise))
     )
-    PointwisePrecision = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.precision, score_type=ScoreType.Pointwise)
+    PointwisePrecision = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.precision, score_type=ScoreType.Pointwise))
     )
-    PointwiseRecall = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.recall, score_type=ScoreType.Pointwise)
+    PointwiseRecall = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.recall, score_type=ScoreType.Pointwise))
     )
 
     # Point-adjusted metrics
-    PointAdjustedF1 = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.f1, score_type=ScoreType.PointAdjusted)
+    PointAdjustedF1 = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.f1, score_type=ScoreType.PointAdjusted))
     )
-    PointAdjustedPrecision = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.precision, score_type=ScoreType.PointAdjusted)
+    PointAdjustedPrecision = enum_member(
+        partial(
+            accumulate_tsad_score, metric=partial(TSADScoreAccumulator.precision, score_type=ScoreType.PointAdjusted)
+        )
     )
-    PointAdjustedRecall = partial(
-        accumulate_tsad_score, metric=partial(TSADScoreAccumulator.recall, score_type=ScoreType.PointAdjusted)
+    PointAdjustedRecall = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.recall, score_type=ScoreType.PointAdjusted))
     )
 
     # NAB scores
-    NABScore = partial(accumulate_tsad_score, metric=TSADScoreAccumulator.nab_score)
-    NABScoreLowFN = partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.nab_score, fn_weight=2.0))
-    NABScoreLowFP = partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.nab_score, fp_weight=0.22))
+    NABScore = enum_member(partial(accumulate_tsad_score, metric=TSADScoreAccumulator.nab_score))
+    NABScoreLowFN = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.nab_score, fn_weight=2.0))
+    )
+    NABScoreLowFP = enum_member(
+        partial(accumulate_tsad_score, metric=partial(TSADScoreAccumulator.nab_score, fp_weight=0.22))
+    )
 
     # Argus metrics
-    F2 = partial(
-        accumulate_tsad_score,
-        metric=partial(TSADScoreAccumulator.f_beta, score_type=ScoreType.RevisedPointAdjusted, beta=2.0),
+    F2 = enum_member(
+        partial(
+            accumulate_tsad_score,
+            metric=partial(TSADScoreAccumulator.f_beta, score_type=ScoreType.RevisedPointAdjusted, beta=2.0),
+        )
     )
-    F5 = partial(
-        accumulate_tsad_score,
-        metric=partial(TSADScoreAccumulator.f_beta, score_type=ScoreType.RevisedPointAdjusted, beta=5.0),
+    F5 = enum_member(
+        partial(
+            accumulate_tsad_score,
+            metric=partial(TSADScoreAccumulator.f_beta, score_type=ScoreType.RevisedPointAdjusted, beta=5.0),
+        )
     )
 
 
