@@ -6,6 +6,7 @@
 #
 import argparse
 from collections import OrderedDict
+import csv as csvlib
 import glob
 import json
 import logging
@@ -13,8 +14,9 @@ import math
 import os
 import re
 import sys
+import time
 import git
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -40,6 +42,37 @@ MERLION_ROOT = os.path.dirname(os.path.abspath(__file__))
 CONFIG_JSON = os.path.join(MERLION_ROOT, "conf", "benchmark_forecast.json")
 DATADIR = os.path.join(MERLION_ROOT, "data")
 OUTPUTDIR = os.path.join(MERLION_ROOT, "results", "forecast")
+
+CSV_COLUMNS = [
+    "idx",
+    "name",
+    "horizon",
+    "retrain_type",
+    "n_retrain",
+    "RMSE",
+    "sMAPE",
+    "MASE",
+    "recommended",
+    "rec_seconds",
+    "fit_seconds",
+    "rec_params",
+]
+SUMMARY_METRICS = ["sMAPE", "MASE", "RMSE"]
+
+# Recommended parameters that the benchmark protocol fixes itself: the model must forecast the whole test horizon,
+# so the recommended max_forecast_steps (the predictability horizon) is not used.
+FIXED_PARAMS = {"max_forecast_steps"}
+
+# Seasonal period of the naive forecast that scales MASE, following the M4 competition guide.
+M4_MASE_PERIODS = {"Hourly": 24, "Daily": 1, "Weekly": 1, "Monthly": 12, "Quarterly": 4, "Yearly": 1}
+
+
+def parse_slice(s: str) -> slice:
+    """Parses a Python slice, e.g. '0:100' or '3::8'."""
+    parts = [int(p) if p.strip() else None for p in s.split(":")]
+    if not 2 <= len(parts) <= 3:
+        raise argparse.ArgumentTypeError(f"Expected a slice like '0:100' or '3::8', got {s!r}.")
+    return slice(*parts)
 
 
 def parse_args():
@@ -95,6 +128,30 @@ def parse_args():
     )
     parser.add_argument("--n_retrain", type=int, default=0, help="Specify the number of retrain times.")
     parser.add_argument(
+        "--series",
+        type=parse_slice,
+        default=None,
+        help="Only evaluate the time series whose indices are in this Python slice, e.g. '0:100' or '3::8' (every "
+        "8th series, starting at 3). Combine with --hash to split a slow model into shards that run in parallel.",
+    )
+    parser.add_argument(
+        "--recommend",
+        action="store_true",
+        default=False,
+        help="Override the configured hyperparameters with the ones the dashboard recommends "
+        "(merlion/dashboard/models/recommend.py), computed on each time series' initial training data only. "
+        "The recommended max_forecast_steps is not used, since the benchmark sets it to the forecast horizon. "
+        "Results go to a separate '_rec' results directory, so --summarize compares them with the defaults.",
+    )
+    parser.add_argument(
+        "--mase_period",
+        type=int,
+        default=None,
+        help="Seasonal period of the naive forecast that scales MASE. Defaults to the M4 guide's period for M4 "
+        "subsets, and to a period inferred from the granularity otherwise (one day below daily data, 7 for daily, "
+        "12 for monthly, 4 for quarterly, 1 otherwise).",
+    )
+    parser.add_argument(
         "--load_checkpoint",
         action="store_true",
         default=False,
@@ -135,6 +192,13 @@ def parse_args():
             args.models = ["ARIMA"]
         elif len(args.models) == 0:
             parser.error("At least one model required if --summarize not given")
+
+    if args.recommend:
+        from merlion.dashboard.models.recommend import RECOMMENDERS
+
+        unsupported = [m for m in args.models if resolve_model_name(m) not in RECOMMENDERS]
+        if unsupported:
+            parser.error(f"--recommend does not support {unsupported}. Supported models: {sorted(RECOMMENDERS)}")
 
     return args
 
@@ -211,11 +275,63 @@ def get_combiner(ensemble_type: str) -> CombinerBase:
         raise KeyError(f"ensemble_type {ensemble_type} not supported.")
 
 
-def get_dirname(model_names: List[str], ensemble_type: str) -> str:
+def get_dirname(model_names: List[str], ensemble_type: str, recommend: bool = False) -> str:
     dirname = "+".join(sorted(model_names))
     if len(model_names) > 1:
         dirname += "_" + ensemble_type
+    if recommend:
+        dirname += "_rec"
     return dirname
+
+
+def recommend_params(model_name: str, train_vals: TimeSeries, target_seq_index: Optional[int]) -> dict:
+    """
+    The hyperparameters the dashboard recommends for the model, computed from the training data only. The values go
+    through the same validation and conversion as the ones confirmed in the dashboard popup.
+    """
+    # Imported here, so that the dashboard dependencies are only needed with --recommend
+    from merlion.dashboard.models.forecast import ForecastModel
+    from merlion.dashboard.models.recommend import format_value, parse_confirmed_values
+
+    df = train_vals.to_pd()
+    target = df.columns[target_seq_index or 0]
+    features = [c for c in df.columns if c != target]
+    rec = ForecastModel.recommend_params(model_name, df, target, feature_columns=features)
+    params = [p for p in rec.params if p.name not in FIXED_PARAMS]
+    overrides, errors = parse_confirmed_values([p.spec() for p in params], [format_value(p.value) for p in params])
+    if errors:
+        raise ValueError(" ".join(errors))
+    return overrides
+
+
+def get_mase_period(dataset: BaseDataset, train_vals: TimeSeries, mase_period: Optional[int] = None) -> int:
+    """The seasonal period of the naive forecast that scales MASE (1 if the training data is too short for it)."""
+    if mase_period is None and isinstance(dataset, M4):
+        mase_period = M4_MASE_PERIODS[dataset.subset]
+    if mase_period is None:
+        dt = np.median(np.diff(train_vals.time_stamps))
+        day = 86400
+        if dt < day:
+            mase_period = int(round(day / dt))
+        elif dt < 7 * day:
+            mase_period = 7
+        elif 28 * day <= dt < 32 * day:
+            mase_period = 12
+        elif 85 * day <= dt < 95 * day:
+            mase_period = 4
+        else:
+            mase_period = 1
+    return mase_period if len(train_vals.time_stamps) > mase_period else 1
+
+
+def evaluate_mase(evaluator: ForecastEvaluator, train_vals: TimeSeries, test_vals: TimeSeries, test_pred, period: int):
+    """MASE of the target variable, scaled by the in-sample error of the seasonal naive forecast on the train data."""
+    name = train_vals.names[evaluator.model.target_seq_index or 0]
+    insample, ground_truth = train_vals.univariates[name].to_ts(), test_vals.univariates[name].to_ts()
+    preds = [p for p in (test_pred if isinstance(test_pred, list) else [test_pred]) if not p.is_empty()]
+    weights = np.asarray([len(p) for p in preds])
+    vals = [ForecastMetric.MASE.value(ground_truth, p, insample=insample, periodicity=period) for p in preds]
+    return float(np.dot(weights / weights.sum(), vals))
 
 
 def train_model(
@@ -228,13 +344,21 @@ def train_model(
     n_retrain: int = 10,
     load_checkpoint: bool = False,
     visualize: bool = False,
+    recommend: bool = False,
+    mase_period: Optional[int] = None,
+    series: Optional[slice] = None,
 ):
     """
     Trains all the model on the dataset, and evaluates its predictions for every
-    horizon setting on every time series.
+    horizon setting on every time series (or only the time series selected by the ``series`` slice of their
+    indices).
+
+    With ``recommend``, each model's hyperparameters are recommended from each time series' initial training data
+    (once per time series; the retrained models keep them). If the recommendation fails, e.g. because the series is
+    too short, the configured defaults are used and the ``recommended`` column is 0.
     """
     model_names = [resolve_model_name(m) for m in model_names]
-    dirname = get_dirname(model_names, ensemble_type)
+    dirname = get_dirname(model_names, ensemble_type, recommend)
     dirname = dirname + "_" + retrain_type + str(n_retrain)
     results_dir = os.path.join(MERLION_ROOT, "results", "forecast", dirname)
     os.makedirs(results_dir, exist_ok=True)
@@ -246,17 +370,19 @@ def train_model(
     else:
         i0 = -1
         os.makedirs(os.path.dirname(csv), exist_ok=True)
-        with open(csv, "w") as f:
-            f.write("idx,name,horizon,retrain_type,n_retrain,RMSE,sMAPE\n")
+        with open(csv, "w", newline="") as f:
+            csvlib.writer(f).writerow(CSV_COLUMNS)
 
     model = None
     # loop over dataset
 
     is_multivariate_data = dataset[0][0].shape[1] > 1
 
-    for i, (df, md) in enumerate(tqdm.tqdm(dataset, desc=f"{dataset_name} Dataset")):
+    indices = range(len(dataset))[series or slice(None)]
+    for i in tqdm.tqdm(indices, desc=f"{dataset_name} Dataset"):
         if i <= i0:
             continue
+        df, md = dataset[i]
         trainval = md["trainval"]
 
         # Resample to an appropriate granularity according to metadata
@@ -279,6 +405,24 @@ def train_model(
         train_end_timestamp = train_vals.univariates[train_vals.names[0]].time_stamps[-1]
         test_end_timestamp = test_vals.univariates[test_vals.names[0]].time_stamps[-1]
         test_window_len = test_end_timestamp - train_end_timestamp
+
+        # Recommend each model's hyperparameters from the training data only
+        overrides = {m: {} for m in model_names}
+        recommended, rec_seconds = 0, 0.0
+        if recommend:
+            start = time.time()
+            try:
+                for m in model_names:
+                    target_seq_index = get_model(m, dataset).target_seq_index
+                    overrides[m] = recommend_params(m, train_vals, target_seq_index)
+                recommended = 1
+            except Exception as e:
+                overrides = {m: {} for m in model_names}
+                logger.warning(
+                    f"Could not recommend parameters for {df.columns[0]} ({type(e).__name__}: {e}). Using defaults."
+                )
+            rec_seconds = time.time() - start
+        mase_m = get_mase_period(dataset, train_vals, mase_period)
 
         # Get all the horizon conditions we want to evaluate from metadata
         if any("condition" in k and isinstance(v, list) for k, v in md.items()):
@@ -323,7 +467,7 @@ def train_model(
                 )
 
             # Get Model
-            models = [get_model(m, dataset, max_forecast_steps=max_forecast_steps) for m in model_names]
+            models = [get_model(m, dataset, **overrides[m], max_forecast_steps=max_forecast_steps) for m in model_names]
             if len(models) == 1:
                 model = models[0]
             else:
@@ -336,17 +480,35 @@ def train_model(
             )
 
             # Get Evaluate Results
-            train_result, test_pred = evaluator.get_predict(train_vals=train_vals, test_vals=test_vals)
+            # A model that fails to train or forecast on a time series is part of the result: record NaN metrics for
+            # it and move on, instead of aborting the whole benchmark.
+            start = time.time()
+            try:
+                train_result, test_pred = evaluator.get_predict(train_vals=train_vals, test_vals=test_vals)
+                failed = False
+            except Exception as e:
+                logger.warning(f"{dirname} failed on {df.columns[0]} ({type(e).__name__}: {e}). Recording NaN metrics.")
+                failed = True
+            fit_seconds = time.time() - start
 
-            rmses = evaluator.evaluate(ground_truth=test_vals, predict=test_pred, metric=ForecastMetric.RMSE)
-            smapes = evaluator.evaluate(ground_truth=test_vals, predict=test_pred, metric=ForecastMetric.sMAPE)
+            if failed:
+                rmses = smapes = mases = float("nan")
+            else:
+                rmses = evaluator.evaluate(ground_truth=test_vals, predict=test_pred, metric=ForecastMetric.RMSE)
+                smapes = evaluator.evaluate(ground_truth=test_vals, predict=test_pred, metric=ForecastMetric.sMAPE)
+                mases = evaluate_mase(evaluator, train_vals, test_vals, test_pred, mase_m)
 
             # Log relevant info to the CSV
-            with open(csv, "a") as f:
-                f.write(f"{i},{df.columns[0]},{horizon},{retrain_type},{n_retrain},{rmses},{smapes}\n")
+            rec_params = (
+                json.dumps(overrides if len(model_names) > 1 else overrides[model_names[0]]) if recommend else ""
+            )
+            row = [i, df.columns[0], horizon, retrain_type, n_retrain, rmses, smapes, mases]
+            row += [recommended, f"{rec_seconds:.3f}", f"{fit_seconds:.3f}", rec_params]
+            with open(csv, "a", newline="") as f:
+                csvlib.writer(f).writerow(row)
 
             # generate comparison plot
-            if visualize:
+            if visualize and not failed:
                 name = train_vals.names[0]
                 train_time_stamps = train_vals.univariates[name].time_stamps
                 fig_dir = os.path.join(results_dir, dataset_name + "_figs")
@@ -420,29 +582,25 @@ def join_dfs(name2df: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def summarize_full_df(full_df: pd.DataFrame) -> pd.DataFrame:
-    # Get the names of all algorithms which have full results
-    algs = [col[len("sMAPE") :] for col in full_df.columns if col.startswith("sMAPE") and not full_df[col].isna().any()]
+    # Get the names of all algorithms which have full results. A row whose model failed on the time series has NaN
+    # metrics but a fit time, so it still counts as a result (the metrics below skip it, and "failed" counts it).
+    def complete(alg):
+        col = f"fit_seconds{alg}" if f"fit_seconds{alg}" in full_df.columns else f"sMAPE{alg}"
+        return not full_df[col].isna().any()
+
+    algs = [col[len("sMAPE") :] for col in full_df.columns if col.startswith("sMAPE") and complete(col[len("sMAPE") :])]
     summary_df = pd.DataFrame({alg.lstrip("_"): [] for alg in algs})
 
-    # Compute pooled (per time series) mean/median sMAPE, RMSE
-    mean_smape, med_smape, mean_rmse, med_rmse = [[] for _ in range(4)]
-
-    for ts_name in np.unique(full_df.name):
-        ts = full_df[full_df.name == ts_name]
-        # append smape
-        smapes = ts[[f"sMAPE{alg}" for alg in algs]]
-        mean_smape.append(smapes.mean(axis=0).values)
-        med_smape.append(smapes.median(axis=0).values)
-        # append rmse
-        rmses = ts[[f"RMSE{alg}" for alg in algs]]
-        mean_rmse.append(rmses.mean(axis=0).values)
-        med_rmse.append(rmses.median(axis=0).values)
-
-    # Add mean/median loglifts to the summary dataframe
-    summary_df.loc["mean_sMAPE"] = np.mean(mean_smape, axis=0)
-    summary_df.loc["median_sMAPE"] = np.median(med_smape, axis=0)
-    summary_df.loc["mean_RMSE"] = np.mean(mean_rmse, axis=0)
-    summary_df.loc["median_RMSE"] = np.median(med_rmse, axis=0)
+    # Compute pooled (per time series) mean/median of each metric. Results from before MASE was added have no MASE
+    # column, and get NaN for it.
+    for metric in SUMMARY_METRICS:
+        cols = [f"{metric}{alg}" for alg in algs]
+        if not any(c in full_df.columns for c in cols):
+            continue
+        per_ts = full_df.reindex(columns=["name"] + cols).groupby("name")[cols]
+        summary_df.loc[f"mean_{metric}"] = per_ts.mean().mean(axis=0).values
+        summary_df.loc[f"median_{metric}"] = per_ts.median().median(axis=0).values
+    summary_df.loc["failed"] = [int(full_df[f"sMAPE{alg}"].isna().sum()) for alg in algs]
     return summary_df
 
 
@@ -459,7 +617,7 @@ def main():
     if len(args.models) > 0:
         # Determine the name of the results CSV
         model_names = [resolve_model_name(m) for m in args.models]
-        dirname = get_dirname(model_names, args.ensemble_type)
+        dirname = get_dirname(model_names, args.ensemble_type, args.recommend)
         dirname = dirname + "_" + args.retrain_type + str(args.n_retrain)
         results_dir = os.path.join(MERLION_ROOT, "results", "forecast", dirname)
         basename = dataset_name
@@ -478,20 +636,23 @@ def main():
             csv=csv,
             config_fname=config_fname,
             load_checkpoint=args.load_checkpoint,
+            series=args.series,
             visualize=args.visualize,
+            recommend=args.recommend,
+            mase_period=args.mase_period,
         )
 
-        # Pool the mean/medium sMAPE, RMSE for all evaluation
+        # Pool the mean/medium sMAPE, MASE, RMSE for all evaluation
         # settings for each time series, and report summary
         # pooled statistics.
         df = pd.read_csv(csv)
         summary = summarize_full_df(df)
         summary.to_csv(os.path.join(results_dir, f"{basename}_summary.csv"), index=True)
         summary = summary[summary.columns[0]]
-        logger.info(f"Pooled mean   sMAPE: {summary['mean_sMAPE']:.4f}")
-        logger.info(f"Pooled median sMAPE: {summary['median_sMAPE']:.4f}")
-        logger.info(f"Pooled mean   RMSE: {summary['mean_RMSE']:.4f}")
-        logger.info(f"Pooled median RMSE: {summary['median_RMSE']:.4f}")
+        for stat in summary.index:
+            logger.info(f"Pooled {stat:13s}: {summary[stat]:.4f}")
+        if args.recommend:
+            logger.info(f"Recommended for {int(df.recommended.sum())} of {len(df)} evaluations.")
 
     # Now we summarize all results. Get all the individual CSV's as dataframes
     name2df = OrderedDict()

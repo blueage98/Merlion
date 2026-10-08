@@ -29,6 +29,8 @@ Benchmark scripts (used to produce the results in the technical report):
 ```shell script
 python benchmark_anomaly.py --dataset NAB_realAWSCloudwatch --model IsolationForest --retrain_freq 1d
 python benchmark_forecast.py --dataset M4_Hourly --model ETS
+python benchmark_forecast.py --dataset M4_Hourly --model ETS --recommend   # dashboard-recommended params, results in ETS_rec_*
+python benchmark_forecast.py --dataset M4_Hourly --summarize               # compare all runs (sMAPE/MASE/RMSE)
 ```
 Model/dataset configs for these scripts live in `conf/benchmark_anomaly.json` and `conf/benchmark_forecast.json`.
 
