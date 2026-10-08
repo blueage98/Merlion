@@ -15,6 +15,21 @@ from ts_datasets.base import BaseDataset
 logger = logging.getLogger(__name__)
 
 
+def _freq_aliases():
+    """
+    The pandas offset alias of each M4 subset. pandas 2.2 renamed the hourly and period-end aliases ("H" -> "h",
+    "M" -> "ME", "Q" -> "QE", "Y" -> "YE"), and pandas 3 no longer accepts the old ones.
+    """
+    try:
+        pd.tseries.frequencies.to_offset("ME")
+        return dict(Hourly="h", Daily="D", Weekly="W", Monthly="ME", Quarterly="QE", Yearly="YE")
+    except ValueError:
+        return dict(Hourly="H", Daily="D", Weekly="W", Monthly="M", Quarterly="Q", Yearly="Y")
+
+
+FREQ_ALIASES = _freq_aliases()
+
+
 class M4(BaseDataset):
     """
     The M4 Competition data is an extended and diverse set of time series to
@@ -51,7 +66,7 @@ class M4(BaseDataset):
             download(rootdir, self.url, "M4-info")
 
         # extract starting date from meta-information of dataset
-        self.freq = subset[0]
+        self.freq = FREQ_ALIASES[subset]
         self.info_dataset = pd.read_csv(os.path.join(rootdir, "M4-info.csv"), parse_dates=True).set_index("M4id")
 
         train_csv = os.path.join(rootdir, f"train/{subset}-train.csv")
@@ -73,9 +88,9 @@ class M4(BaseDataset):
         try:
             ts.index = pd.date_range(start=t0, periods=len(ts), freq=self.freq)
         except Exception as e:
-            if self.freq == "Y":
+            if self.subset == "Yearly":
                 logger.warning(f"Time series {i} too long for yearly granularity. Using quarterly instead.")
-                ts.index = pd.date_range(start=t0, periods=len(ts), freq="Q")
+                ts.index = pd.date_range(start=t0, periods=len(ts), freq=FREQ_ALIASES["Quarterly"])
             else:
                 raise e
         md = pd.DataFrame({"trainval": ts.index < ts.index[len(train)]}, index=ts.index)
