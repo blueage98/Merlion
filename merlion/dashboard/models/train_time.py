@@ -12,8 +12,9 @@ The cost model of each algorithm comes from measured ``model.train()`` times (20
 data with a daily cycle) over the data length and the parameters that drive the cost:
 
 - ETS: the seasonal period. ETS estimates one initial state per step of the period, and the time grows steeply with
-  it (2 s for 48 steps, 44 s for 144 and 100 s for 192 on 2000 points), so the measured times are interpolated
-  log-log and extrapolated with the slope of the longest periods.
+  it (2 s for 48 steps, 44 s for 144, 100 s for 192 and ~32 min for 463 on 2000 points), so the measured times are
+  interpolated log-log and extrapolated with the slope of the longest periods. The periods above 192 were measured on
+  the SKAB and NAB machine temperature sensor data of the manufacturing benchmark.
 - Arima/Sarima: the dimension of the state of the SARIMAX model, ``max(p + P m, q + Q m + 1) + d + D m``.
 - Tree models: the data length and ``maxlags`` (power laws fitted to the measurements, within 7% of them).
 - Prophet, AutoETS, AutoProphet, VectorAR, DefaultForecaster: the data length.
@@ -35,7 +36,18 @@ import numpy as np
 REFERENCE_SECONDS = 0.41
 
 #: ETS training time on 2000 points by seasonal period (0: no seasonality), in seconds.
-ETS_BY_PERIOD = [(1, 0.04), (12, 0.49), (24, 0.94), (48, 1.99), (96, 4.09), (144, 44.5), (192, 100.3)]
+ETS_BY_PERIOD = [
+    (1, 0.04),
+    (12, 0.49),
+    (24, 0.94),
+    (48, 1.99),
+    (96, 4.09),
+    (144, 44.5),
+    (192, 100.3),
+    (237, 175.3),
+    (463, 1897.0),
+    (493, 2380.0),
+]
 #: ETS training time relative to 2000 points, by data length (seasonal period 48).
 ETS_BY_LENGTH = [(500, 0.36), (1000, 0.56), (2000, 1.0), (4000, 1.9), (8000, 7.55)]
 
