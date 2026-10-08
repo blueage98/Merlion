@@ -54,6 +54,15 @@ class ForecastModel(ModelMixin, DataMixin):
     ic_max_points = 2000
     # Maximum number of ARIMA models fitted by the stepwise order search (high orders take ~0.5s each to fit).
     ic_max_fits = 15
+    # Longest seasonal period ARIMA models with a long AR part (p >= period). Fitting an AR part of 48-60 lags takes a
+    # few seconds on 2000 points; much longer periods (e.g. the daily cycle of 5-minute data) are not modeled.
+    arima_max_period = 48
+    # Maximum AR order of the long-AR candidate (searched up to twice the period, capped here).
+    arima_max_ar = 60
+    # Length of the holdout the ARIMA candidates are compared on, in seasonal cycles (or in default steps without a
+    # seasonal period).
+    arima_holdout_cycles = 2
+    arima_holdout_steps = 24
     # Longest seasonal period for which SARIMA gets a seasonal part. Fitting gets slower with the period: searching
     # the seasonal orders takes ~4s for 24 (e.g. daily cycle of hourly data), ~15s for 48 and over a minute for 100.
     sarima_max_period = 24

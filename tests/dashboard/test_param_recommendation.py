@@ -9,7 +9,7 @@ Tests for the per-algorithm hyperparameter recommendations (merlion/dashboard/mo
 Forecasting tab before training. Each test uses synthetic data whose structure (period, trend, unit roots, order)
 is known, and checks that the recommended values recover it.
 """
-import sys
+
 import time
 
 import numpy as np
@@ -18,14 +18,6 @@ import pytest
 
 from merlion.dashboard.models.forecast import ForecastModel
 from merlion.dashboard.models.recommend import SeriesStats, ndiffs, stepwise_arma_search
-
-# Recommendations resample the data with TemporalResample, which is broken on Python 3.14
-# by the AggregationPolicy/Enum bug documented in test_anomaly_model.py.
-PY314_RESAMPLE_BUG = pytest.mark.xfail(
-    condition=sys.version_info >= (3, 14),
-    reason="Python 3.14 Enum does not treat functools.partial values as members, breaking TimeSeries.align()",
-    strict=True,
-)
 
 
 def _df(values, freq="h", **columns):
@@ -64,7 +56,6 @@ def _params(rec):
 # --- shared statistics ------------------------------------------------------------------------------------------------
 
 
-@PY314_RESAMPLE_BUG
 def test_series_stats_detects_period_and_seasonal_strength():
     stats = SeriesStats(_df(_sine(period=24)), "value")
     assert 24 in stats.periods
@@ -73,7 +64,6 @@ def test_series_stats_detects_period_and_seasonal_strength():
     assert stats.trend_strength(24) < 0.5
 
 
-@PY314_RESAMPLE_BUG
 def test_series_stats_white_noise_has_no_structure():
     stats = SeriesStats(_df(_white_noise()), "value")
     assert stats.periods == []
@@ -82,7 +72,6 @@ def test_series_stats_white_noise_has_no_structure():
     assert stats.seasonal_strength(24) < 0.5
 
 
-@PY314_RESAMPLE_BUG
 def test_series_stats_trend_and_multiplicative_seasonality():
     stats = SeriesStats(_df(_multiplicative()), "value")
     assert stats.trend_strength(12) > 0.5
@@ -95,17 +84,16 @@ def test_series_stats_trend_and_multiplicative_seasonality():
     assert not additive.is_multiplicative(12, 0.5)[0]
 
 
-@PY314_RESAMPLE_BUG
 def test_multiplicative_needs_positive_data():
     stats = SeriesStats(_df(_multiplicative() - 100), "value")
     mul, why = stats.is_multiplicative(12, 0.5)
     assert not mul and "<= 0" in why
 
 
-@PY314_RESAMPLE_BUG
 def test_max_forecast_steps_follows_acf_decay():
     # AR(1) with phi = 0.95 has ACF(h) = 0.95 ** h, which drops below 0.5 at h = 14
-    rec = ForecastModel.recommend_params("Arima", _df(_ar([0.95], n=5000), freq="min"), "value")
+    # (shared by all algorithms except a differencing Arima/Sarima, whose horizon follows the differenced series)
+    rec = ForecastModel.recommend_params("LGBMForecaster", _df(_ar([0.95], n=5000), freq="min"), "value")
     assert 9 <= _params(rec)["max_forecast_steps"] <= 19
 
 
@@ -130,7 +118,6 @@ def test_tuned_algorithms_are_registered():
         ForecastModel.recommend_params("AutoETS", _df(_white_noise()), "value")
 
 
-@PY314_RESAMPLE_BUG
 def test_lgbm_recommendation_is_unchanged():
     df = _df(_sine(period=24))
     expected = ForecastModel.recommend_lgbm_params(df, "value")
@@ -139,7 +126,6 @@ def test_lgbm_recommendation_is_unchanged():
     assert rec.n_points == expected["n_points"] and rec.granularity == expected["granularity"]
 
 
-@PY314_RESAMPLE_BUG
 @pytest.mark.parametrize("algorithm", ["RandomForestForecaster", "ExtraTreesForecaster"])
 def test_tree_models_use_seasonal_period_as_maxlags(algorithm):
     rec = ForecastModel.recommend_params(algorithm, _df(_sine(period=24)), "value")
@@ -178,7 +164,6 @@ def test_stepwise_search_respects_fit_budget():
     assert n_fits <= 5
 
 
-@PY314_RESAMPLE_BUG
 def test_arima_recommendation():
     rec = ForecastModel.recommend_params("Arima", _df(np.cumsum(_white_noise(n=2000))), "value")
     order = _params(rec)["order"]
@@ -191,7 +176,6 @@ def test_arima_recommendation():
     assert order[1] == 0 and order[0] >= 1
 
 
-@PY314_RESAMPLE_BUG
 def test_arima_horizon_after_differencing_follows_the_differences():
     # a random walk's differences are white noise: once differenced, ARIMA has nothing to forecast but the level
     rec = ForecastModel.recommend_params("Arima", _df(np.cumsum(_white_noise(n=2000))), "value")
@@ -202,7 +186,6 @@ def test_arima_horizon_after_differencing_follows_the_differences():
     assert SeriesStats(_df(np.cumsum(_white_noise(n=2000))), "value").horizon(ForecastModel.acf_threshold) > 50
 
 
-@PY314_RESAMPLE_BUG
 def test_arima_horizon_without_differencing_uses_shared_rule():
     df = _df(_ar([0.6, 0.3]))
     rec = ForecastModel.recommend_params("Arima", df, "value")
@@ -210,18 +193,36 @@ def test_arima_horizon_without_differencing_uses_shared_rule():
     assert _params(rec)["max_forecast_steps"] == SeriesStats(df, "value").horizon(ForecastModel.acf_threshold)
 
 
-@PY314_RESAMPLE_BUG
-def test_arima_notes_unmodeled_seasonality():
+def test_arima_models_a_short_seasonal_period_with_a_long_ar_part():
+    # Arima has no seasonal part: for the daily cycle of hourly data, the recommended AR part reaches one cycle back
     rec = ForecastModel.recommend_params("Arima", _df(_sine(period=24)), "value")
-    assert any("seasonal period of 24 steps" in n and "Use Sarima" in n for n in rec.notes)
+    params = _params(rec)
+    assert params["order"][0] >= 24 and params["order"][2] == 0
+    assert params["max_forecast_steps"] >= 24
+    basis = rec.params[0].basis
+    assert "long AR order" in basis and "lowest mean absolute error" in basis
+    assert not any("seasonal period" in n for n in rec.notes)
+
+
+def test_arima_holdout_rules_out_orders_that_do_not_forecast():
+    # Arima fits without a constant term, so with d = 0 the forecast of a series around 100 decays towards 0 (or
+    # diverges, since stationarity is not enforced). Comparing the candidates on a holdout picks d = 1 instead.
+    rec = ForecastModel.recommend_params("Arima", _df(100 + _ar([0.6, 0.3])), "value")
+    assert _params(rec)["order"][1] == 1
+    assert "short order (" in rec.params[0].basis  # the d = 0 candidate was compared and lost
+
+
+def test_arima_notes_unmodeled_seasonality():
+    # the daily cycle of 5-minute data (288 steps) is longer than arima_max_period
     df = _df(_sine(period=288, n_periods=10, amplitude=5), freq="5min")
     rec = ForecastModel.recommend_params("Arima", df, "value")
-    assert any("coarser granularity" in n and "Prophet" in n for n in rec.notes)
+    assert _params(rec)["order"][0] < 288
+    assert any("coarser granularity" in n and "LGBMForecaster" in n for n in rec.notes)
+    assert not any("Sarima" in n for n in rec.notes)
     rec = ForecastModel.recommend_params("Arima", _df(_ar([0.6, 0.3])), "value")
     assert not any("seasonal period" in n for n in rec.notes)
 
 
-@PY314_RESAMPLE_BUG
 def test_arima_search_on_long_data_is_bounded():
     rec_start = time.time()
     rec = ForecastModel.recommend_params("Arima", _df(np.cumsum(_white_noise(n=20000)), freq="min"), "value")
@@ -234,7 +235,6 @@ def test_arima_search_on_long_data_is_bounded():
 # --- Sarima -----------------------------------------------------------------------------------------------------------
 
 
-@PY314_RESAMPLE_BUG
 def test_sarima_daily_cycle_of_hourly_data():
     start = time.time()
     rec = ForecastModel.recommend_params("Sarima", _df(_sine(period=24)), "value")
@@ -251,7 +251,6 @@ def test_sarima_daily_cycle_of_hourly_data():
     assert not any("seasonal period" in n for n in rec.notes)
 
 
-@PY314_RESAMPLE_BUG
 def test_sarima_period_longer_than_cap_has_no_seasonal_part():
     # the daily cycle of 5-minute data (288 steps) is longer than sarima_max_period
     df = _df(_sine(period=288, n_periods=10, amplitude=5), freq="5min")
@@ -265,7 +264,6 @@ def test_sarima_period_longer_than_cap_has_no_seasonal_part():
     assert any("which Sarima does not model" in n for n in rec.notes)
 
 
-@PY314_RESAMPLE_BUG
 def test_sarima_without_seasonality():
     rec = ForecastModel.recommend_params("Sarima", _df(_ar([0.6, 0.3])), "value")
     params = {p.name: p for p in rec.params}
@@ -276,7 +274,6 @@ def test_sarima_without_seasonality():
 # --- ETS --------------------------------------------------------------------------------------------------------------
 
 
-@PY314_RESAMPLE_BUG
 def test_ets_trend_and_multiplicative_seasonality():
     rec = ForecastModel.recommend_params("ETS", _df(_multiplicative()), "value")
     assert _params(rec) | {"max_forecast_steps": None} == {
@@ -289,7 +286,6 @@ def test_ets_trend_and_multiplicative_seasonality():
     }
 
 
-@PY314_RESAMPLE_BUG
 def test_ets_white_noise():
     params = _params(ForecastModel.recommend_params("ETS", _df(_white_noise()), "value"))
     assert params["trend"] == "None"
@@ -297,7 +293,6 @@ def test_ets_white_noise():
     assert params["seasonal_periods"] is None
 
 
-@PY314_RESAMPLE_BUG
 def test_ets_long_period_is_recommended_with_warning():
     df = _df(_sine(period=288, n_periods=10, amplitude=5), freq="5min")
     rec = ForecastModel.recommend_params("ETS", df, "value")
@@ -310,7 +305,6 @@ def test_ets_long_period_is_recommended_with_warning():
     assert rec.notes == []
 
 
-@PY314_RESAMPLE_BUG
 def test_ets_trains_with_recommended_settings(set_progress):
     df = _df(_multiplicative())
     train_df, test_df = df.iloc[:400], df.iloc[400:]
@@ -326,7 +320,6 @@ def test_ets_trains_with_recommended_settings(set_progress):
 # --- Prophet ----------------------------------------------------------------------------------------------------------
 
 
-@PY314_RESAMPLE_BUG
 def test_prophet_calendar_seasonalities():
     # 8 weeks of hourly data with a daily cycle
     rec = ForecastModel.recommend_params("Prophet", _df(_sine(period=24, n_periods=56)), "value")
@@ -338,7 +331,6 @@ def test_prophet_calendar_seasonalities():
     assert "less than two yearly cycles" in basis["yearly_seasonality"]
 
 
-@PY314_RESAMPLE_BUG
 def test_prophet_daily_seasonality_not_observable_on_daily_data():
     rec = ForecastModel.recommend_params("Prophet", _df(_white_noise(n=800), freq="D"), "value")
     params = _params(rec)
@@ -349,7 +341,6 @@ def test_prophet_daily_seasonality_not_observable_on_daily_data():
 # --- VectorAR ---------------------------------------------------------------------------------------------------------
 
 
-@PY314_RESAMPLE_BUG
 def test_vector_ar_order_of_var2_process():
     rng = np.random.default_rng(0)
     a1 = np.array([[0.5, 0.1], [0.2, 0.3]])
@@ -362,14 +353,12 @@ def test_vector_ar_order_of_var2_process():
     assert "AIC" in rec.params[0].basis and "HQIC" in rec.params[0].basis
 
 
-@PY314_RESAMPLE_BUG
 def test_vector_ar_univariate_order():
     rec = ForecastModel.recommend_params("VectorAR", _df(_ar([0.4, 0.2, 0.3])), "value")
     assert 2 <= _params(rec)["maxlags"] <= 4
     assert "univariate" in rec.params[0].basis
 
 
-@PY314_RESAMPLE_BUG
 def test_vector_ar_with_constant_feature_omits_maxlags():
     # a constant feature makes the VAR covariance matrix singular: only maxlags is left out
     x = _ar([0.5])
@@ -381,7 +370,6 @@ def test_vector_ar_with_constant_feature_omits_maxlags():
 # --- DefaultForecaster ------------------------------------------------------------------------------------------------
 
 
-@PY314_RESAMPLE_BUG
 def test_default_forecaster_granularity(set_progress):
     df = _df(_sine(period=288, n_periods=10, amplitude=5), freq="5min")
     train_df, test_df = df.iloc[:2500], df.iloc[2500:]

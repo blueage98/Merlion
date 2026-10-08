@@ -65,7 +65,7 @@ Confirm을 누르면 시스템은 SHALL 팝업 입력란의 값을 알고리즘 
 - **THEN** 추천 `max_forecast_steps`는 약 13(9 이상 19 이하)이다
 
 ### Requirement: 차분하는 ARIMA·SARIMA의 max_forecast_steps는 차분한 값의 자기상관으로 추천한다
-Arima·Sarima 추천이 차분(d ≥ 1 또는 D = 1)을 포함하면 시스템은 SHALL `max_forecast_steps`를 모델이 예측하는 차분한 값의 자기상관으로 정한다: 차분한 값의 |ACF|가 95% 유의 한계 안으로 처음 들어가기 직전의 시차(최소 1). 계절 차분(D = 1)이 있으면 SHALL 최소 한 주기(m)로 정한다. 근거에는 SHALL 그 시차 뒤로는 예측이 현재 수준에서 평평해진다(또는 마지막 주기를 반복한다)는 설명을 포함한다.
+Arima·Sarima 추천이 차분(d ≥ 1 또는 D = 1)을 포함하면 시스템은 SHALL `max_forecast_steps`를 모델이 예측하는 차분한 값의 자기상관으로 정한다: 차분한 값의 |ACF|가 95% 유의 한계 안으로 처음 들어가기 직전의 시차(최소 1). 계절 차분(D = 1)이 있거나, Arima가 계절 주기 m 이상의 AR 차수(긴 AR 차수)를 추천하면 SHALL 최소 한 주기(m)로 정한다. 근거에는 SHALL 그 시차 뒤로는 예측이 현재 수준에서 평평해진다(또는 마지막 주기를 반복한다)는 설명을 포함한다.
 
 #### Scenario: 랜덤 워크
 - **WHEN** 랜덤 워크 데이터로 Arima 추천을 계산해 d = 1이 추천된다
@@ -76,15 +76,15 @@ Arima·Sarima 추천이 차분(d ≥ 1 또는 D = 1)을 포함하면 시스템�
 - **THEN** 추천 `max_forecast_steps`는 24 이상이다
 
 ### Requirement: Arima·Sarima는 표현하지 못하는 계절 주기를 안내한다
-유의한 계절 주기가 있는데 추천한 모델이 그 주기를 표현하지 못하면(Arima, 또는 주기가 상한보다 길어 계절 항을 뺀 Sarima) 시스템은 SHALL 팝업 노트에 그 주기와 기간, 그리고 대안을 표시한다. 주기가 Sarima 상한 이하이면 대안은 SHALL Sarima이고, 상한보다 길면 SHALL 더 큰 간격으로 리샘플링하거나 그 주기를 표현하는 알고리즘(LGBMForecaster/RandomForestForecaster, Prophet)을 쓰라는 안내다.
+유의한 계절 주기가 있는데 추천한 모델이 그 주기를 표현하지 못하면(Arima는 지배적 주기가 Arima 주기 상한(기본 48)보다 긴 경우, Sarima는 주기가 Sarima 상한보다 길어 계절 항을 뺀 경우) 시스템은 SHALL 팝업 노트에 그 주기와 기간, 그리고 대안을 표시한다. 대안은 SHALL 더 큰 간격으로 리샘플링하거나 그 주기를 표현하는 알고리즘을 쓰라는 안내다(Arima: LGBMForecaster/RandomForestForecaster, Sarima: LGBMForecaster/RandomForestForecaster, Prophet). 제조 데이터에서는 SARIMA 계열을 쓰지 않으므로 Arima 안내는 SHALL Sarima를 대안으로 제시하지 않는다.
 
 #### Scenario: 1분 데이터의 1일 주기
 - **WHEN** 1분 간격 데이터에서 1440(1일) 주기가 검출된 상태로 Arima 추천을 계산한다
-- **THEN** 팝업 노트에 ARIMA가 1440단계(1일) 주기를 표현하지 못하며, 리샘플링하거나 LGBMForecaster·Prophet 등을 쓰라는 안내가 표시된다
+- **THEN** 팝업 노트에 ARIMA가 1440단계(1일) 주기를 표현하지 못하며, 리샘플링하거나 LGBMForecaster 등을 쓰라는 안내가 표시되고, Sarima는 언급되지 않는다
 
-#### Scenario: Sarima로 표현 가능한 주기
+#### Scenario: Arima 주기 상한 이하의 주기
 - **WHEN** 1시간 간격·주기 24 데이터로 Arima 추천을 계산한다
-- **THEN** 팝업 노트에 Sarima를 쓰라는 안내가 표시된다
+- **THEN** 추천 `order`의 p는 24 이상이고(긴 AR 차수), 팝업 노트에 계절 주기 안내가 표시되지 않는다
 
 ### Requirement: 자기회귀 트리 모델의 maxlags는 지배적 계절 주기로 추천한다
 LGBMForecaster, RandomForestForecaster, ExtraTreesForecaster는 SHALL 같은 규칙으로 `maxlags`를 추천한다: `max_forecast_steps`보다 긴 유의한 계절 주기 중 ACF가 임계값 이상이면서 가장 높은 주기. 그런 주기가 없으면 SHALL `max_forecast_steps` 이상이 되도록 정한다. 기존 LGBMForecaster 추천 결과는 SHALL 바뀌지 않는다.
@@ -93,8 +93,19 @@ LGBMForecaster, RandomForestForecaster, ExtraTreesForecaster는 SHALL 같은 규
 - **WHEN** 주기 24의 사인파에 잡음을 더한 데이터로 RandomForestForecaster 추천을 계산한다
 - **THEN** 추천 `maxlags`는 24이다
 
-### Requirement: Arima의 order는 단위근 검정과 정보 기준으로 추천한다
-Arima의 `order (p, d, q)` 추천은 SHALL 차분 차수 d를 단위근 검정으로 정하고(최대 2), 그 d에서 p와 q를 정보 기준(AICc)이 가장 작은 조합으로 정한다. p와 q의 탐색 범위는 SHALL 각각 0~5로 제한한다. 근거에는 SHALL 검정 결과와 선택한 조합의 정보 기준 값을 포함한다.
+### Requirement: Arima의 order는 후보를 Arima와 같은 방식으로 적합해 홀드아웃 오차로 고른다
+Arima의 `order (p, d, q)` 추천은 SHALL 후보 차수를 만들고, 각 후보를 학습 데이터에서 최근 홀드아웃 구간을 뺀 데이터로 Arima 모델과 같은 방식(추세 항 없음, 정상성·가역성 강제 안 함)으로 적합해, 홀드아웃 구간 예측의 평균 절대 오차가 가장 작은 후보를 추천한다. 적합에 실패하거나 예측이 발산한 후보는 SHALL 고르지 않는다. 후보는 SHALL 다음과 같다.
+- 짧은 차수: 단위근 검정(KPSS)으로 정한 d(최대 2)에서 정보 기준(AICc)이 가장 작은 p, q(각 0~5).
+- 검정이 d = 0이면, d = 1에서 같은 탐색으로 정한 짧은 차수.
+- Arima 주기 상한(기본 48) 이하의 유의한 계절 주기 m이 있으면, d ∈ {검정한 d, 1}마다 긴 AR 차수: p는 AIC가 가장 작은 AR 차수(최대 2m, 상한 60)이되 m 이상, q = 0.
+
+홀드아웃 길이는 SHALL m이 있으면 두 주기(2m), 없으면 24단계다. 후보가 하나뿐이거나 데이터가 홀드아웃 비교에 충분히 길지 않으면 SHALL 짧은 차수를 추천한다. 근거에는 SHALL 선택한 후보의 선정 근거(검정 결과와 정보 기준 값, 또는 긴 AR 차수의 주기)와 후보별 홀드아웃 오차를 포함한다.
+
+배경(2026-10-08 M4 Hourly 414개 시계열 벤치마크): 이전 규칙(짧은 차수만, 정상성을 강제한 AICc로 선택)은 Arima 모델이 정상성을 강제하지 않고 상수항 없이 적합하는 것과 맞지 않아, 44개 시계열에서 MASE가 10을 넘고 일부는 예측이 발산했다(중앙값 sMAPE 10.9). 이 규칙으로 바꾼 뒤 시험에서 중앙값 sMAPE 4.5, MASE가 10을 넘는 시계열은 없었다.
+
+#### Scenario: 상수항 없이 0으로 감쇠하는 후보 배제
+- **WHEN** 수준 100 주위의 정상 AR(2) 과정 데이터로 Arima 추천을 계산한다
+- **THEN** d = 0 후보는 홀드아웃에서 예측이 0 쪽으로 감쇠하거나 발산해 지고, 추천 `order`의 d는 1이다
 
 #### Scenario: 랜덤 워크
 - **WHEN** 랜덤 워크(누적합 잡음) 데이터로 Arima 추천을 계산한다

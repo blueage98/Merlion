@@ -163,16 +163,18 @@ class SeriesStats:
         below = np.flatnonzero(self.acf[1:] < threshold)
         return max(int(below[0]) if len(below) > 0 else self.max_lag, 1)
 
-    def dominant_period(self, min_period=1, threshold=None, require_trough=True) -> Optional[int]:
+    def dominant_period(self, min_period=1, threshold=None, require_trough=True, max_period=None) -> Optional[int]:
         """
-        The significant period with the highest ACF among those > ``min_period`` (and ACF >= ``threshold``).
+        The significant period with the highest ACF among those > ``min_period`` (and ACF >= ``threshold``, and
+        <= ``max_period``).
 
         With ``require_trough``, the ACF must also be higher at the period than at half of it: a seasonal cycle has a
         trough half a period earlier, while short lags of a slowly changing series (e.g. 17 steps of a 288-step
         cycle) have a high ACF just because consecutive values are close.
         """
         acf = self.acf
-        candidates = [p for p in self.periods if min_period < p <= self.max_lag and acf[p] > 0]
+        max_period = self.max_lag if max_period is None else min(max_period, self.max_lag)
+        candidates = [p for p in self.periods if min_period < p <= max_period and acf[p] > 0]
         if threshold is not None:
             candidates = [p for p in candidates if acf[p] >= threshold]
         if require_trough:
@@ -515,19 +517,137 @@ def recommend_tree(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> 
     return Recommendation(algorithm, params, stats.n_points, granularity)
 
 
+def _arima_forecast(y, order, steps) -> Optional[np.ndarray]:
+    """
+    Fits ARIMA the way the Arima model does (SARIMAX without a trend term, without enforcing stationarity or
+    invertibility) and forecasts ``steps`` ahead. ``None`` if fitting fails or the forecast is not finite.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = sm.tsa.SARIMAX(y, order=order, enforce_stationarity=False, enforce_invertibility=False)
+            forecast = np.asarray(model.fit(disp=0).forecast(steps), dtype=float)
+        return forecast if np.all(np.isfinite(forecast)) else None
+    except Exception:
+        return None
+
+
+def _long_ar_order(y, d, m, cfg) -> int:
+    """
+    AR order of the long-AR candidate for seasonal period ``m``: the AR order with the lowest AIC among those up to
+    ``2 m`` (at most ``arima_max_ar``) on the (differenced) data, and at least ``m``, so that the AR part reaches one
+    full cycle back and the forecast can follow the cycle.
+    """
+    z = np.diff(y, n=d) if d > 0 else y
+    max_lag = max(m, min(2 * m, cfg.arima_max_ar, len(z) // 10))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            lags = ar_select_order(z, maxlag=max_lag, ic="aic", trend="c" if d == 0 else "n").ar_lags
+    except Exception:
+        lags = None
+    return int(max(max(lags or [0]), m))
+
+
+def _unmodeled_arima_period_note(stats: SeriesStats, cfg, m, algorithm) -> str:
+    duration = steps_to_duration(m, stats.granularity)
+    return (
+        f"The data has a seasonal period of {m} steps ({duration}, ACF = {stats.acf[m]:.2f}), which {algorithm} does "
+        f"not model: an AR part reaching one cycle back is too slow to fit for periods longer than "
+        f"{cfg.arima_max_period} steps, so its forecast cannot follow this cycle. Resample the data at a coarser "
+        f"granularity (so that the period is at most {cfg.arima_max_period} steps), or use an algorithm that models it: "
+        f"LGBMForecaster/RandomForestForecaster (maxlags >= {m})."
+    )
+
+
 def recommend_arima(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> Recommendation:
-    """Arima: ``order`` from the KPSS test (d) and a stepwise AICc search (p, q)."""
+    """
+    Arima: ``order`` chosen among candidates by their forecast error on a holdout, fitted the way the Arima model is.
+
+    The candidates are:
+
+    - the short order: d from the KPSS test, (p, q) from a stepwise AICc search (and the same search with d = 1 if the
+      KPSS test gives d = 0),
+    - if there is a seasonal period m of at most ``arima_max_period`` steps, a long AR order (p >= m, q = 0) with
+      d = 0 and/or 1, so that the forecast follows the cycle. Arima has no seasonal part, so a long AR part is how it
+      can model a cycle.
+
+    Each candidate is fitted without the latest ``arima_holdout_cycles`` cycles (or ``arima_holdout_steps`` steps) of
+    the data, like the Arima model fits (no trend term, stationarity not enforced), and the one with the lowest mean
+    absolute error on those points is recommended. This also rules out orders whose fit diverges, and orders with
+    d = 0 whose forecast decays to 0 (there is no constant term).
+    """
     y = stats.tail(cfg.ic_max_points)
     d, kpss_pvals = ndiffs(y)
+    m = stats.dominant_period(max_period=cfg.arima_max_period)
+    m_all = stats.dominant_period()
+
+    # Candidate orders, with how they were chosen
+    candidates = {}
+    short = _arima_order(y, d, kpss_pvals, cfg)
+    if short is not None:
+        candidates[tuple(short[0])] = ("short order", short[1])
+    if d == 0:
+        (p1, q1), aicc, n_fits = stepwise_arma_search(y, 1, max_fits=cfg.ic_max_fits)
+        if np.isfinite(aicc):
+            basis = (
+                f"d = 1 (alternative to the KPSS test's d = 0). p = {p1}, q = {q1}: lowest AICc ({aicc:.1f}) among "
+                f"{n_fits} models (stepwise search)."
+            )
+            candidates.setdefault((p1, 1, q1), ("short order with d = 1", basis))
+    if m is not None:
+        for dd in sorted({d, 1}):
+            p_long = _long_ar_order(y, dd, m, cfg)
+            basis = (
+                f"d = {dd}. p = {p_long}: AR order with the lowest AIC up to {min(2 * m, cfg.arima_max_ar)} lags and at "
+                f"least the seasonal period m = {m} ({steps_to_duration(m, stats.granularity)}, ACF = "
+                f"{stats.acf[m]:.2f}), so that the forecast follows the cycle. q = 0."
+            )
+            candidates.setdefault((p_long, dd, 0), (f"long AR order (d = {dd})", basis))
+
+    # Compare the candidates on a holdout, if the data is long enough for it
+    holdout = cfg.arima_holdout_cycles * m if m is not None else cfg.arima_holdout_steps
+    errors = {}
+    if len(candidates) > 1 and len(y) - holdout >= max(4 * holdout, 10 * max(o[0] for o in candidates), 50):
+        for order in candidates:
+            forecast = _arima_forecast(y[:-holdout], order, holdout)
+            errors[order] = np.inf if forecast is None else float(np.mean(np.abs(y[-holdout:] - forecast)))
+
     params = []
-    order = _arima_order(y, d, kpss_pvals, cfg)
-    if order is not None:
-        params.append(ParamRecommendation("order", list(order[0]), "int_tuple", order[1], tuple_len=3))
-    params.append(recommend_arima_horizon(stats, cfg, y, d))
+    chosen = None
+    if errors and np.isfinite(min(errors.values())):
+        chosen = min(errors, key=errors.get)
+        ranking = ", ".join(
+            f"{candidates[o][0]} ({', '.join(map(str, o))}): " + ("failed" if not np.isfinite(e) else f"{e:.3g}")
+            for o, e in sorted(errors.items(), key=lambda oe: oe[1])
+        )
+        basis = (
+            f"{candidates[chosen][1]} Chosen for the lowest mean absolute error when forecasting the latest {holdout} "
+            f"points from the {len(y) - holdout} before them, fitted the way Arima fits (no trend term, stationarity "
+            f"not enforced). Errors: {ranking}."
+        )
+    elif short is not None:
+        chosen, basis = tuple(short[0]), short[1]
+    if chosen is not None:
+        params.append(ParamRecommendation("order", list(chosen), "int_tuple", basis, tuple_len=3))
+
+    # max_forecast_steps: with a long AR part, the forecast repeats the cycle, so it covers at least one cycle
+    d_chosen = chosen[1] if chosen is not None else d
+    horizon = recommend_arima_horizon(stats, cfg, y, d_chosen)
+    if chosen is not None and m is not None and chosen[0] >= m and horizon.value < m:
+        horizon = ParamRecommendation(
+            "max_forecast_steps",
+            int(m),
+            "int",
+            f"The AR part reaches one seasonal cycle ({m} steps) back, so the forecast follows the cycle for at least "
+            f"one cycle ahead.",
+            is_steps=True,
+        )
+    params.append(horizon)
+
     notes = [f"The order search used the latest {len(y)} points."]
-    seasonality = _unmodeled_seasonality_note(stats, cfg, stats.dominant_period(), algorithm)
-    if seasonality:
-        notes.insert(0, seasonality)
+    if m_all is not None and m_all > cfg.arima_max_period:
+        notes.insert(0, _unmodeled_arima_period_note(stats, cfg, m_all, algorithm))
     return Recommendation(algorithm, params, stats.n_points, stats.granularity, ic_points=len(y), notes=notes)
 
 
