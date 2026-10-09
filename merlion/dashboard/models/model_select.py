@@ -15,6 +15,13 @@ On M4 Hourly and the manufacturing windows (499 series, the same candidates), th
 than scoring a single holdout of ``horizon`` points (median test MASE 0.747 vs 0.800; better on 176 series, worse on
 125, Wilcoxon p = 3e-5), and better than always using the best single algorithm (168 vs 102, p = 1e-6). sMAPE and
 MAE picked the same model on 92% of the series; MAE is used since sMAPE is unstable for values near 0 (sensor data).
+
+With feature or exogenous variables, the candidates are validated on the variables they are trained on. On 88
+multivariate series (SKAB sensors, energy_power, seattle_trail, solar_plant, Walmart sales with exogenous variables),
+with the picked model trained with those variables, this picked better models than validating on the target alone
+(median test MASE 0.831 vs 1.200; better on 45 series, worse on 12, p = 1e-5): validated on the target alone, tree
+models were often picked, but forecast worse once trained on all the variables. VectorAR (added with feature variables)
+was picked on 8 of 68 series and made no clear difference (better on 4, worse on 4, p = 0.67).
 """
 
 from dataclasses import dataclass, field
@@ -38,6 +45,8 @@ logger = logging.getLogger(__name__)
 #: Algorithms compared by default (the candidates of the 2026-10-09 benchmark). Prophet has no recommender and is
 #: compared with its default settings; SARIMA-type models are not used for manufacturing data.
 DEFAULT_CANDIDATES = ["ETS", "Arima", "LGBMForecaster", "RandomForestForecaster", "ExtraTreesForecaster", "Prophet"]
+#: Algorithms added to the default candidates when there are feature variables (they model all the variables jointly).
+MULTIVARIATE_CANDIDATES = ["VectorAR"]
 
 
 @dataclass
@@ -89,6 +98,8 @@ def recommend_model(
     target_column,
     horizon: int,
     cfg,
+    feature_columns: Sequence = None,
+    exog_columns: Sequence = None,
     algorithms: Sequence[str] = None,
     make_model: Callable = None,
     params_fn: Callable = None,
@@ -97,29 +108,46 @@ def recommend_model(
     """
     Recommends the algorithm with the lowest validation error among ``algorithms``.
 
-    :param train_df: the training data (univariate target).
+    The candidates see the variables the way `ForecastModel.train` arranges them (``cfg.arrange_columns``): the
+    target first, then the feature variables, then the exogenous variables. A model supporting exogenous variables
+    gets them as ``exog_data`` (including their values over the validation part, which are known in advance); other
+    models get them as ordinary input variables. The validation error is that of the target only.
+
+    :param train_df: the training data.
     :param horizon: the number of steps to forecast at a time.
-    :param valid_frac: the fraction of the (latest) training data used for validation.
     :param cfg: the settings class (``ForecastModel``).
+    :param feature_columns: the other variables the models are trained on. Their recommended hyperparameters take
+        them into account (tree models, VectorAR), and VectorAR is added to the default candidates.
+    :param exog_columns: the exogenous variables (not used to recommend the hyperparameters).
+    :param algorithms: the candidates (default: ``DEFAULT_CANDIDATES``, plus ``MULTIVARIATE_CANDIDATES`` if there
+        are feature variables).
     :param make_model: builds a model from ``(algorithm, params)`` (default: `ModelFactory.create`).
     :param params_fn: the hyperparameters of ``(algorithm, train_df, target_column)`` (default: the recommended ones).
+    :param valid_frac: the fraction of the (latest) training data used for validation.
     """
-    algorithms = list(algorithms or DEFAULT_CANDIDATES)
+    layout = cfg.arrange_columns(train_df, target_column, feature_columns, exog_columns)
+    target_column, feature_columns = layout.target_column, layout.feature_columns
+    if algorithms is None:
+        algorithms = DEFAULT_CANDIDATES + (MULTIVARIATE_CANDIDATES if feature_columns else [])
+    algorithms = list(algorithms)
     make_model = make_model or (lambda algorithm, params: ModelFactory.create(algorithm, **params))
-    params_fn = params_fn or (lambda algorithm, df, target: recommended_params(algorithm, df, target, cfg))
+    params_fn = params_fn or (
+        lambda algorithm, df, target: recommended_params(algorithm, df, target, cfg, feature_columns or None)
+    )
 
-    if target_column not in train_df:
-        target_column = int(target_column)
-    ts = TimeSeries.from_pd(train_df.loc[:, [target_column]])
+    # Resample all the variables together (as the models' default transform does), then split
+    ts = TimeSeries.from_pd(train_df.loc[:, layout.columns])
     resample = TemporalResample()
     resample.train(ts)
     data = resample(ts).to_pd()
     n = len(data)
     n_valid = int(max(1, valid_frac * n))
     horizon = int(max(1, min(horizon, n_valid)))
-    fit_part, valid_part = TimeSeries.from_pd(data.iloc[:-n_valid]), TimeSeries.from_pd(data.iloc[-n_valid:])
     step = data.index[1] - data.index[0] if n > 1 else pd.Timedelta(seconds=1)
     evaluator_config = ForecastEvaluatorConfig(retrain_freq=None, horizon=step * horizon)
+    valid_target = TimeSeries.from_pd(data.iloc[-n_valid:, [layout.target_seq_index]])
+    # Like in training, the exogenous data is not resampled here: the models resample it to the training data
+    exog_ts = TimeSeries.from_pd(train_df.loc[:, layout.exog_columns]) if layout.exog_columns else None
 
     candidates, notes = [], []
     for algorithm in algorithms:
@@ -131,7 +159,7 @@ def recommend_model(
             notes.append(f"{algorithm}: no recommended settings ({type(e).__name__}), its defaults are used.")
         params["max_forecast_steps"] = horizon
         cand = ModelCandidate(algorithm, params)
-        est = estimate_train_seconds(algorithm, params, n)
+        est = estimate_train_seconds(algorithm, params, n, n_variables=len(layout.columns))
         cand.estimated_seconds = None if est is None else est.seconds
         if est is not None and est.seconds > cfg.train_confirm_seconds:
             cand.status = f"left out: estimated training time {est.seconds:.0f} s > {cfg.train_confirm_seconds} s"
@@ -139,9 +167,17 @@ def recommend_model(
             continue
         start = time.time()
         try:
-            evaluator = ForecastEvaluator(model=make_model(algorithm, params), config=evaluator_config)
-            _, forecast = evaluator.get_predict(train_vals=fit_part, test_vals=valid_part)
-            mae = float(ForecastMetric.MAE.value(valid_part, forecast))
+            model_params = dict(params)
+            if len(layout.columns) > 1:
+                model_params["target_seq_index"] = layout.target_seq_index
+            model = make_model(algorithm, model_params)
+            columns = layout.model_columns(model.supports_exog)
+            fit_part = TimeSeries.from_pd(data.iloc[:-n_valid].loc[:, columns])
+            valid_part = TimeSeries.from_pd(data.iloc[-n_valid:].loc[:, columns])
+            exog_data = exog_ts if model.supports_exog else None
+            evaluator = ForecastEvaluator(model=model, config=evaluator_config)
+            _, forecast = evaluator.get_predict(train_vals=fit_part, test_vals=valid_part, exog_data=exog_data)
+            mae = float(ForecastMetric.MAE.value(valid_target, forecast))
             if not np.isfinite(mae):
                 raise ValueError("the forecast is not finite")
             cand.valid_mae = mae

@@ -16,7 +16,9 @@ data with a daily cycle) over the data length and the parameters that drive the 
   interpolated log-log and extrapolated with the slope of the longest periods. The periods above 192 were measured on
   the SKAB and NAB machine temperature sensor data of the manufacturing benchmark.
 - Arima/Sarima: the dimension of the state of the SARIMAX model, ``max(p + P m, q + Q m + 1) + d + D m``.
-- Tree models: the data length and ``maxlags`` (power laws fitted to the measurements, within 7% of them).
+- Tree models: the data length, ``maxlags`` and the number of variables (power laws fitted to the measurements,
+  within 7% of them; with several variables, the models take the lags of all of them and forecast all of them, which
+  multiplied the time by 5.6 (LGBM), 8.0 (random forest) and 7.1 (extra trees) for 8 variables, measured 2026-10-09).
 - Prophet, AutoETS, AutoProphet, VectorAR, DefaultForecaster: the data length.
 
 The times are then scaled by the speed of the machine running the dashboard relative to the calibration machine:
@@ -151,15 +153,16 @@ def _sarimax(algorithm, params, n):
     return seconds * (n / 2000), f"{what} on {n} points (a state of {k} dimensions)"
 
 
-def _trees(algorithm, params, n):
+def _trees(algorithm, params, n, n_variables=1):
     lags = int(params.get("maxlags") or 24)
-    base, n_exp, lag_exp = {
-        "LGBMForecaster": (0.23, 0.39, 0.21),
-        "RandomForestForecaster": (1.32, 1.21, 0.89),
-        "ExtraTreesForecaster": (0.73, 1.07, 0.87),
+    base, n_exp, lag_exp, var_exp = {
+        "LGBMForecaster": (0.23, 0.39, 0.21, 0.83),
+        "RandomForestForecaster": (1.32, 1.21, 0.89, 1.0),
+        "ExtraTreesForecaster": (0.73, 1.07, 0.87, 0.95),
     }[algorithm]
-    seconds = base * (n / 2000) ** n_exp * (lags / 24) ** lag_exp
-    return seconds, f"{algorithm} with maxlags = {lags} on {n} points"
+    seconds = base * (n / 2000) ** n_exp * (lags / 24) ** lag_exp * max(int(n_variables), 1) ** var_exp
+    what = f"{algorithm} with maxlags = {lags} on {n} points"
+    return seconds, what if n_variables <= 1 else f"{what} of {n_variables} variables"
 
 
 def _by_length(algorithm, params, n, n_variables):
@@ -189,7 +192,7 @@ def estimate_train_seconds(algorithm, params, n_points, n_variables=1) -> Option
     elif algorithm in ("Arima", "Sarima"):
         seconds, basis = _sarimax(algorithm, params, n)
     elif algorithm in ("LGBMForecaster", "RandomForestForecaster", "ExtraTreesForecaster"):
-        seconds, basis = _trees(algorithm, params, n)
+        seconds, basis = _trees(algorithm, params, n, n_variables)
     elif algorithm in ("Prophet", "AutoETS", "AutoProphet", "DefaultForecaster", "VectorAR"):
         seconds, basis = _by_length(algorithm, params, n, n_variables)
     else:

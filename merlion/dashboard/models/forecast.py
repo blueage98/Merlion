@@ -4,8 +4,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
 #
+from dataclasses import dataclass
 import logging
 import sys
+from typing import Optional, Tuple
 
 import pandas as pd
 
@@ -26,6 +28,40 @@ from merlion.dashboard.models.utils import ModelMixin, DataMixin
 from merlion.dashboard.utils.log import DashLogger
 
 dash_logger = DashLogger(stream=sys.stdout)
+
+
+@dataclass
+class ColumnLayout:
+    """
+    How the variables are arranged for a forecasting model: the target first, then the feature variables, then the
+    exogenous variables. Used both to train a model (`ForecastModel.train`) and to validate the candidate algorithms
+    (merlion/dashboard/models/model_select.py), so that both see the data the same way.
+    """
+
+    target_column: object
+    feature_columns: list
+    exog_columns: list
+
+    @property
+    def columns(self) -> list:
+        return [self.target_column] + self.feature_columns + self.exog_columns
+
+    @property
+    def target_seq_index(self) -> int:
+        return self.columns.index(self.target_column)
+
+    def model_columns(self, supports_exog) -> list:
+        """The columns of the model's training data: the exogenous variables are left out if the model takes them
+        separately (``exog_data``), and are ordinary input variables otherwise."""
+        if supports_exog and self.exog_columns:
+            return [self.target_column] + self.feature_columns
+        return self.columns
+
+    def split(self, df: pd.DataFrame, supports_exog) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        """``(data, exog)``: the model's training data and its exogenous data (``None`` if it takes none)."""
+        if supports_exog and self.exog_columns:
+            return df.loc[:, self.model_columns(True)], df.loc[:, self.exog_columns]
+        return df.loc[:, self.columns], None
 
 
 class ForecastModel(ModelMixin, DataMixin):
@@ -120,13 +156,48 @@ class ForecastModel(ModelMixin, DataMixin):
         return rec
 
     @staticmethod
-    def recommend_model(train_df, target_column, horizon, algorithms=None) -> ModelRecommendation:
+    def arrange_columns(train_df, target_column, feature_columns=None, exog_columns=None) -> ColumnLayout:
+        """
+        The arrangement of the variables for training (see `ColumnLayout`). Column names are converted to ``int`` if
+        they are not in the data as given (the dashboard passes them as strings).
+
+        :raises ValueError: if the target variable is neither in the data nor an integer.
+        :raises AssertionError: if the target or an exogenous variable is not in the data.
+        """
+        if target_column not in train_df:
+            target_column = int(target_column)
+        assert target_column in train_df, f"The target variable {target_column} is not in the time series."
+        try:
+            feature_columns = [int(c) if c not in train_df else c for c in feature_columns or []]
+        except ValueError:
+            feature_columns = []
+        try:
+            exog_columns = [int(c) if c not in train_df else c for c in exog_columns or []]
+        except ValueError:
+            exog_columns = []
+        for exog_column in exog_columns:
+            assert exog_column in train_df, f"Exogenous variable {exog_column} is not in the time series."
+        return ColumnLayout(target_column, feature_columns, exog_columns)
+
+    @staticmethod
+    def recommend_model(
+        train_df, target_column, horizon, feature_columns=None, exog_columns=None, algorithms=None
+    ) -> ModelRecommendation:
         """
         Recommends a forecasting algorithm (with its recommended hyperparameters) for the training data, by the error
-        of each candidate on the last 20% of the data, forecast ``horizon`` steps at a time. See
+        of each candidate on the last 20% of the data, forecast ``horizon`` steps at a time. The candidates are
+        trained on the variables arranged the way `train` does (target, feature and exogenous variables). See
         merlion/dashboard/models/model_select.py.
         """
-        return recommend_model(train_df, target_column, horizon, ForecastModel, algorithms=algorithms)
+        return recommend_model(
+            train_df,
+            target_column,
+            horizon,
+            ForecastModel,
+            feature_columns=feature_columns,
+            exog_columns=exog_columns,
+            algorithms=algorithms,
+        )
 
     @staticmethod
     def estimate_train_time(
@@ -178,38 +249,36 @@ class ForecastModel(ModelMixin, DataMixin):
             for m in ["MAE", "MARRE", "RMSE", "sMAPE", "RMSPE"]
         }
 
-    def train(self, algorithm, train_df, test_df, target_column, feature_columns, exog_columns, params, set_progress):
-        if target_column not in train_df:
-            target_column = int(target_column)
-        assert target_column in train_df, f"The target variable {target_column} is not in the time series."
-        try:
-            feature_columns = [int(c) if c not in train_df else c for c in feature_columns]
-        except ValueError:
-            feature_columns = []
-        try:
-            exog_columns = [int(c) if c not in train_df else c for c in exog_columns]
-        except ValueError:
-            exog_columns = []
-        for exog_column in exog_columns:
-            assert exog_column in train_df, f"Exogenous variable {exog_column} is not in the time series."
+    @staticmethod
+    def _forecast_horizon_end(model, max_forecast_steps):
+        """
+        The last time stamp a trained model can forecast, computed the way `ForecasterBase.resample_time_stamps` does:
+        ``max_forecast_steps`` steps of the training granularity after the end of the training data. ``None`` if the
+        model does not expose its granularity.
+        """
+        dt, t0 = getattr(model, "timedelta", None), getattr(model, "last_train_time", None)
+        if dt is None or t0 is None:
+            return None
+        offset = getattr(model, "timedelta_offset", pd.Timedelta(0))
+        steps = pd.date_range(start=t0, periods=max_forecast_steps + 1, freq=dt) + offset
+        steps = steps[1:] if steps[0] == t0 else steps[:-1]
+        return steps[-1]
 
-        # Re-arrange dataframe so that the target column is first, and exogenous columns are last
-        columns = [target_column] + feature_columns + exog_columns
-        train_df = train_df.loc[:, columns]
-        test_df = test_df.loc[:, columns]
+    def train(self, algorithm, train_df, test_df, target_column, feature_columns, exog_columns, params, set_progress):
+        # Arrange the columns so that the target column is first, and exogenous columns are last
+        layout = ForecastModel.arrange_columns(train_df, target_column, feature_columns, exog_columns)
+        train_df = train_df.loc[:, layout.columns]
+        test_df = test_df.loc[:, layout.columns]
 
         # Get the target_seq_index & initialize the model
-        params["target_seq_index"] = columns.index(target_column)
+        params["target_seq_index"] = layout.target_seq_index
         model_class = ModelFactory.get_model_class(algorithm)
         model = model_class(model_class.config_class(**params))
 
         # Handle exogenous regressors if they are supported by the model
-        if model.supports_exog and len(exog_columns) > 0:
-            exog_ts = TimeSeries.from_pd(pd.concat((train_df.loc[:, exog_columns], test_df.loc[:, exog_columns])))
-            train_df = train_df.loc[:, [target_column] + feature_columns]
-            test_df = test_df.loc[:, [target_column] + feature_columns]
-        else:
-            exog_ts = None
+        train_df, train_exog = layout.split(train_df, model.supports_exog)
+        test_df, test_exog = layout.split(test_df, model.supports_exog)
+        exog_ts = None if train_exog is None else TimeSeries.from_pd(pd.concat((train_exog, test_exog)))
 
         self.logger.info(f"Training the forecasting model: {algorithm}...")
         set_progress(("2", "10"))
@@ -226,8 +295,15 @@ class ForecastModel(ModelMixin, DataMixin):
 
         test_ts = TimeSeries.from_pd(test_df)
         if "max_forecast_steps" in params and params["max_forecast_steps"] is not None:
-            n = min(len(test_ts) - 1, int(params["max_forecast_steps"]))
-            test_ts, _ = test_ts.bisect(t=test_ts.time_stamps[n])
+            # Keep the test points the model can forecast. The horizon is max_forecast_steps steps of the training
+            # granularity, which is not max_forecast_steps rows of irregularly sampled data (e.g. 1-second data with
+            # some 2-second gaps spans more time than the horizon).
+            t_end = ForecastModel._forecast_horizon_end(model, int(params["max_forecast_steps"]))
+            if t_end is not None:
+                test_ts, _ = test_ts.bisect(t=t_end, t_in_left=True)
+            else:
+                n = min(len(test_ts) - 1, int(params["max_forecast_steps"]))
+                test_ts, _ = test_ts.bisect(t=test_ts.time_stamps[n])
 
         self.logger.info("Computing test performance metrics...")
         test_pred, test_err = model.forecast(time_stamps=test_ts.time_stamps, exog_data=exog_ts)

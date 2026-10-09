@@ -512,11 +512,53 @@ def recommend_tree(algorithm, stats: SeriesStats, cfg, feature_columns=None) -> 
             f"No seasonal period with ACF >= {threshold} beyond the forecast horizon (searched up to "
             f"{rec['max_lag_searched']} steps), so it covers the forecast horizon."
         )
+    maxlags = rec["maxlags"]
+    feature_columns = list(feature_columns or [])
+    if feature_columns:
+        # With feature variables, the model takes the last maxlags values of every variable. A feature variable whose
+        # past values say most about the target further back than maxlags is only seen if maxlags covers that lag.
+        column, lag, corr = strongest_lead(stats, feature_columns)
+        k = len(feature_columns) + 1
+        if lag > maxlags and abs(corr) >= threshold:
+            maxlags = lag
+            maxlags_basis = (
+                f"The feature variable {column} correlates most with the target {lag} steps later (cross-correlation "
+                f"= {corr:.2f}, >= {threshold}), beyond the {rec['maxlags']} steps from the target alone: "
+                f"{maxlags_basis}"
+            )
+        else:
+            maxlags_basis += (
+                f" The feature variables were considered: their strongest lead on the target is {column} by {lag} "
+                f"step(s) (cross-correlation = {corr:.2f}), within these lags."
+            )
+        maxlags_basis += f" The model takes the last maxlags values of all {k} variables ({k * maxlags} inputs)."
     params = [
-        ParamRecommendation("maxlags", rec["maxlags"], "int", maxlags_basis, is_steps=True),
+        ParamRecommendation("maxlags", int(maxlags), "int", maxlags_basis, is_steps=True),
         recommend_max_forecast_steps(stats, cfg),
     ]
     return Recommendation(algorithm, params, stats.n_points, granularity)
+
+
+def strongest_lead(stats: SeriesStats, feature_columns) -> Tuple[Any, int, float]:
+    """
+    The feature variable whose past values correlate most with the target: ``(column, lag, correlation)``, where the
+    correlation is between the feature variable and the target ``lag`` steps later (1 <= lag <= ``max_lag``).
+    """
+    data = stats.multivariate(feature_columns)
+    y = data.iloc[:, 0].values
+    best = (data.columns[1], 1, 0.0)
+    for column in data.columns[1:]:
+        x = data[column].values
+        if np.std(x) == 0 or np.std(y) == 0:
+            continue
+        # ccf(y, x)[lag] is the correlation between y[t + lag] and x[t]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            corr = np.nan_to_num(sm.tsa.stattools.ccf(y, x, adjusted=False, nlags=stats.max_lag + 1))[1:]
+        lag = int(np.argmax(np.abs(corr))) + 1
+        if abs(corr[lag - 1]) > abs(best[2]):
+            best = (column, lag, float(corr[lag - 1]))
+    return best
 
 
 def _arima_forecast(y, order, steps) -> Optional[np.ndarray]:
