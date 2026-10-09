@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD — captures the dashboard Data page's ability to load bundled repo sample CSV files (in addition to user-uploaded files) via a dedicated "Sample Data" dropdown, gated by a Data Source selector.
+대시보드 Data 페이지에서 사용자가 CSV 파일을 매번 업로드하지 않고도, 저장소의 `./data` 폴더에 있는 샘플 CSV를 골라 기존 데이터 로딩·그래프 흐름으로 바로 불러올 수 있게 한다. Data Source 선택으로 업로드 파일과 샘플 파일 중 어느 쪽을 쓸지 명확히 정한다.
 
 ## Requirements
 
