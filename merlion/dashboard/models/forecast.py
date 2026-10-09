@@ -21,6 +21,7 @@ from merlion.dashboard.models.recommend import (
     steps_to_duration,
 )
 from merlion.dashboard.models.train_time import TrainTimeEstimate, estimate_train_seconds
+from merlion.dashboard.models.model_select import ModelRecommendation, recommend_model
 from merlion.dashboard.models.utils import ModelMixin, DataMixin
 from merlion.dashboard.utils.log import DashLogger
 
@@ -117,6 +118,15 @@ class ForecastModel(ModelMixin, DataMixin):
         if not rec.params:
             raise ValueError(f"Could not recommend any setting for {algorithm}.")
         return rec
+
+    @staticmethod
+    def recommend_model(train_df, target_column, horizon, algorithms=None) -> ModelRecommendation:
+        """
+        Recommends a forecasting algorithm (with its recommended hyperparameters) for the training data, by the error
+        of each candidate on the last 20% of the data, forecast ``horizon`` steps at a time. See
+        merlion/dashboard/models/model_select.py.
+        """
+        return recommend_model(train_df, target_column, horizon, ForecastModel, algorithms=algorithms)
 
     @staticmethod
     def estimate_train_time(
