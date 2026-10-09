@@ -1,0 +1,33 @@
+{
+  "code_version_info": {
+    "commit": "ce74c493aa1d0836623db82b3cf17941cb9a0d7d",
+    "time": "2026-10-07 22:39:22.725671"
+  },
+  "evaluator_config": {
+    "cadence": null,
+    "horizon": 0.0,
+    "retrain_freq": null,
+    "train_window": null
+  },
+  "model_config": {
+    "damped_trend": true,
+    "dim": 1,
+    "error": "add",
+    "invert_transform": true,
+    "max_forecast_steps": 48,
+    "refit": true,
+    "seasonal": "add",
+    "seasonal_periods": null,
+    "target_seq_index": 0,
+    "transform": {
+      "aggregation_policy": "Mean",
+      "granularity": 3600.0,
+      "missing_value_policy": "FFill",
+      "name": "TemporalResample",
+      "origin": 1493294400.0,
+      "remove_non_overlapping": true,
+      "trainable_granularity": true
+    },
+    "trend": "add"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "code_version_info": {
+    "commit": "60042cecdd23ff45e2efc041366fe84fecef3bbc",
+    "time": "2026-10-08 21:33:50.572130"
+  },
+  "evaluator_config": {
+    "cadence": null,
+    "horizon": 0.0,
+    "retrain_freq": null,
+    "train_window": null
+  },
+  "model_config": {
+    "additive_only": false,
+    "allow_multiplicative_trend": false,
+    "auto_damped": true,
+    "auto_error": true,
+    "auto_seasonal": true,
+    "auto_seasonality": true,
+    "auto_trend": true,
+    "dim": 1,
+    "information_criterion": "AIC",
+    "max_lag": null,
+    "model": {
+      "damped_trend": false,
+      "dim": 1,
+      "error": "add",
+      "invert_transform": true,
+      "max_forecast_steps": 60,
+      "name": "ETS",
+      "refit": true,
+      "seasonal": "add",
+      "seasonal_periods": 4,
+      "target_seq_index": 0,
+      "transform": {
+        "name": "TransformSequence",
+        "transforms": [
+          {
+            "aggregation_policy": "Mean",
+            "granularity": 1.0,
+            "missing_value_policy": "FFill",
+            "name": "TemporalResample",
+            "origin": 1581175647.0,
+            "remove_non_overlapping": true,
+            "trainable_granularity": true
+          }
+        ]
+      },
+      "trend": null
+    },
+    "model_kwargs": {},
+    "periodicity_strategy": "ACF",
+    "pval": 0.05,
+    "restrict": true,
+    "transform": {
+      "name": "Identity"
+    }
+  }
+}

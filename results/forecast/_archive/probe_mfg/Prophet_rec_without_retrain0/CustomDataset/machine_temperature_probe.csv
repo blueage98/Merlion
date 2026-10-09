@@ -1,0 +1,2 @@
+idx,name,horizon,retrain_type,n_retrain,RMSE,sMAPE,MASE,recommended,rec_seconds,fit_seconds,rec_params
+0,mt_000,10800.0,without_retrain,0,13.7013733191978,18.531217237399623,1.3841381467639655,1,0.310,0.630,"{""yearly_seasonality"": false, ""weekly_seasonality"": false, ""daily_seasonality"": true, ""seasonality_mode"": ""additive""}"

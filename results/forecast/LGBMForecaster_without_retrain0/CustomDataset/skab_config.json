@@ -1,0 +1,43 @@
+{
+  "code_version_info": {
+    "commit": "60042cecdd23ff45e2efc041366fe84fecef3bbc",
+    "time": "2026-10-08 21:34:09.883006"
+  },
+  "evaluator_config": {
+    "cadence": null,
+    "horizon": 0.0,
+    "retrain_freq": null,
+    "train_window": null
+  },
+  "model_config": {
+    "dim": 1,
+    "exog_aggregation_policy": "Mean",
+    "exog_missing_value_policy": "ZFill",
+    "exog_transform": {
+      "bias": null,
+      "name": "MeanVarNormalize",
+      "normalize_bias": true,
+      "normalize_scale": true,
+      "scale": null
+    },
+    "invert_transform": true,
+    "learning_rate": 0.1,
+    "max_depth": 7,
+    "max_forecast_steps": 60,
+    "maxlags": 21,
+    "n_estimators": 100,
+    "n_jobs": -1,
+    "prediction_stride": 1,
+    "random_state": null,
+    "target_seq_index": 0,
+    "transform": {
+      "aggregation_policy": "Mean",
+      "granularity": 1.0,
+      "missing_value_policy": "FFill",
+      "name": "TemporalResample",
+      "origin": 1581175647.0,
+      "remove_non_overlapping": true,
+      "trainable_granularity": true
+    }
+  }
+}

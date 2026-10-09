@@ -1,0 +1,2 @@
+idx,name,horizon,retrain_type,n_retrain,RMSE,sMAPE,MASE,recommended,rec_seconds,fit_seconds,rec_params
+0,accelerometer1rms_000,60.0,without_retrain,0,0.0035541644218727306,1.3955198516589475,2.4248897828597578,0,0.000,0.574,

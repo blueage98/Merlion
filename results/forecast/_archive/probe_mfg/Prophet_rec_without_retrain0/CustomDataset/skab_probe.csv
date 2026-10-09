@@ -1,0 +1,2 @@
+idx,name,horizon,retrain_type,n_retrain,RMSE,sMAPE,MASE,recommended,rec_seconds,fit_seconds,rec_params
+0,accelerometer1rms_000,60.0,without_retrain,0,0.0015188022353907786,0.5387110230536085,0.9287981227717292,1,0.252,0.420,"{""yearly_seasonality"": false, ""weekly_seasonality"": false, ""daily_seasonality"": false, ""seasonality_mode"": ""additive""}"

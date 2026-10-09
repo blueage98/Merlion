@@ -1,0 +1,3 @@
+idx,name,horizon,retrain_type,n_retrain,RMSE,sMAPE,MASE,recommended,rec_seconds,fit_seconds,rec_params
+7,H8,172800.0,without_retrain,0,1311.4582285541894,3.2607391346841985,0.6700337404862902,0,0.000,413.560,
+19,H20,172800.0,without_retrain,0,359.6878330965335,3.799616040933552,0.6339646050081735,0,0.000,72.528,
