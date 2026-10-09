@@ -102,9 +102,19 @@ def create_control_panel() -> html.Div:
                 children=[
                     html.Button(id="forecasting-train-btn", children="Train", n_clicks=0),
                     html.Button(id="forecasting-cancel-btn", children="Cancel", style={"margin-left": "15px"}),
+                    # Auto: select the algorithm and its hyperparameters from the training data, then train
+                    dbc.Checkbox(
+                        id="forecasting-auto-train",
+                        label="Auto",
+                        value=False,
+                        style={"display": "inline-block", "margin-left": "15px"},
+                    ),
                 ],
                 style={"textAlign": "center"},
             ),
+            # The analysis type of the Auto mode (univariate / multivariate) and what it means, empty if Auto is
+            # unchecked. On its own line: next to the buttons, it wrapped under them in the narrow control panel.
+            html.Div(id="forecasting-auto-mode", style={"margin-top": "8px", "font-size": "13px"}),
             html.Br(),
             create_modal(
                 modal_id="forecasting-exception-modal",
@@ -121,6 +131,8 @@ def create_control_panel() -> html.Div:
             dcc.Store(id="forecasting-pending-train"),
             # Starts training: set from a request right away, or once a long training is approved.
             dcc.Store(id="forecasting-train-trigger"),
+            # The model selection of the last Auto training (None after a manual training)
+            dcc.Store(id="forecasting-auto-result"),
         ],
     )
 
@@ -197,6 +209,14 @@ def create_right_column() -> html.Div:
             html.Div(
                 id="result_table_card",
                 children=[
+                    html.B("Model Selection"),
+                    html.Hr(),
+                    html.Div(id="forecasting-model-selection", children=create_model_selection_content(None)),
+                ],
+            ),
+            html.Div(
+                id="result_table_card",
+                children=[
                     html.B("Forecasting Results"),
                     html.Hr(),
                     html.Div(id="forecasting-plots", children=[create_empty_figure()]),
@@ -265,3 +285,77 @@ def create_confirm_inputs(params) -> list:
             value = p.value
         inputs.append(create_confirm_input(p.spec(), value))
     return inputs
+
+
+def analysis_mode_text(mode: dict) -> str:
+    """
+    The analysis type as shown next to the Auto checkbox, e.g. "단변량" or "다변량 (특징 2, 외생 1)".
+
+    :param mode: the analysis type, see `merlion.dashboard.callbacks.forecast.analysis_mode`.
+    """
+    if mode["kind"] == "univariate":
+        return "단변량"
+    return f"다변량 (특징 {mode['n_features']}, 외생 {mode['n_exog']})"
+
+
+def analysis_mode_description(mode: dict) -> str:
+    """What the Auto mode does for the analysis type, shown under the analysis type."""
+    if mode["kind"] == "univariate":
+        return "대상 변수만으로 알고리즘과 하이퍼파라미터를 고릅니다."
+    return (
+        "선택한 특징 변수와 외생 변수를 함께 써서 알고리즘과 하이퍼파라미터를 고릅니다 "
+        "(특징 변수가 있으면 VectorAR도 후보에 포함)."
+    )
+
+
+def recommendation_basis_text(mode: dict) -> str:
+    """The analysis type the hyperparameters were recommended for, e.g. "다변량 기준 추천 (특징 2, 외생 1)"."""
+    if mode["kind"] == "univariate":
+        return "단변량 기준 추천"
+    return f"다변량 기준 추천 (특징 {mode['n_features']}, 외생 {mode['n_exog']})"
+
+
+def _format_seconds(seconds) -> str:
+    return "-" if seconds is None else f"{seconds:.1f} s"
+
+
+def create_model_selection_content(result) -> list:
+    """
+    The content of the Model Selection card: a hint if there is no Auto training result, otherwise the candidates
+    ranked by validation error, the validation part and the notes of the model selection.
+
+    :param result: the content of the ``forecasting-auto-result`` Store, see
+        `merlion.dashboard.callbacks.forecast.run_auto_selection`.
+    """
+    if not result:
+        return [html.P("Auto 모드로 학습하면 후보 비교 결과가 표시됩니다.", style={"color": "grey"})]
+
+    header = html.Tr([html.Th(c) for c in ["Rank", "Algorithm", "Valid MAE", "Status", "Est. train time", "Eval time"]])
+    body, rank = [], 0
+    for cand in result["candidates"]:
+        # Only the evaluated candidates are ranked; they come first, sorted by validation error
+        mae = cand["valid_mae"]
+        rank = rank + 1 if mae is not None else rank
+        body.append(
+            html.Tr(
+                [
+                    html.Td(str(rank) if mae is not None else "-"),
+                    html.Td(cand["algorithm"]),
+                    html.Td(f"{mae:.5g}" if mae is not None else "-"),
+                    html.Td(cand["status"]),
+                    html.Td(_format_seconds(cand["estimated_seconds"])),
+                    html.Td(_format_seconds(cand["eval_seconds"])),
+                ]
+            )
+        )
+    steps = result["params"].get("max_forecast_steps", result["horizon"])
+    content = [
+        html.P(f"Selected: {result['algorithm']} ({recommendation_basis_text(result['mode'])})"),
+        html.Table([header] + body, className="table table-sm"),
+        html.P(
+            f"Validation: the last {result['n_valid']} of {result['n_points']} training points (after resampling), "
+            f"forecast {steps} steps at a time. The test data has {result['horizon']} steps."
+        ),
+    ]
+    content += [html.P(note) for note in result["notes"]]
+    return content
