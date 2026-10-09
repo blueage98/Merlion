@@ -37,7 +37,7 @@
 
 ## 현재 상태
 - **커밋**: 2026-10-09에 `d57035a`(다변량 모델 선택과 테스트 구간 버그 수정), 그다음 커밋(Auto 학습 모드, "Add an Auto mode ...")로 커밋했다. `forecast-benchmark-arima-rec` 브랜치를 main에 fast-forward 병합해 push했다. 현재 브랜치는 `main`이다.
-- **커밋되지 않은 파일**: 없음. 2026-10-09에 `data/M4/`, `data/manufacturing/`, `results/`, `.github/` 지침 파일도 커밋했다. main은 `origin/main`보다 앞서 있고 아직 push하지 않았다.
+- **커밋되지 않은 파일**: 없음. 2026-10-09에 `data/M4/`, `data/manufacturing/`, `results/`, `.github/` 지침 파일도 커밋했다. main을 `origin/main`에 push했다(로컬과 원격이 같다).
 - **실행 중인 서버**: 없음
 - **환경**: Python 3.13.14, dash 2.18.0, numpy 1.26.4, pandas 2.3.3, Java 1.8. pyspark는 설치되어 있지 않다.
 - **최근 테스트 결과**: `python -m pytest tests/dashboard -q` → 151 passed (2026-10-09)
